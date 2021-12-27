@@ -7,6 +7,6 @@ pai -name easy_rec_ext
 -Dbuckets=oss://{OSS_BUCKET_NAME}/
 -DossHost={OSS_ENDPOINT}
 -Dhpo_param_path=oss://{OSS_BUCKET_NAME}/{EXP_NAME}/configs/hpo_param.json
--Deval_method=separate
+-Dwith_evaluator=1
 -Dhpo_metric_save_path=oss://{OSS_BUCKET_NAME}/{EXP_NAME}/dwd_avazu_ctr2/checkpoints4/hpo
 ;

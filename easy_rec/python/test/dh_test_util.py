@@ -9,12 +9,8 @@ import traceback
 
 import oss2
 from datahub import DataHub
-# from datahub.exceptions import LimitExceededException
 from datahub.exceptions import InvalidOperationException
 from datahub.exceptions import ResourceExistException
-# from datahub.exceptions import ResourceNotFoundException
-# from datahub.models import BlobRecord
-# from datahub.models import CursorType
 from datahub.models import FieldType
 from datahub.models import RecordSchema
 from datahub.models import RecordType
@@ -37,8 +33,8 @@ class OdpsOSSConfig:
     self.ali_bucket_name = 'easyrec'
     self.script_path = script_path
     # read only access
-    self.ali_oss_key = ''
-    self.ali_oss_secret = ''
+    self.ali_oss_key = 'oss_key'
+    self.ali_oss_secret = 'oss_secret'
 
     self.oss_key = ''
     self.oss_secret = ''
@@ -148,8 +144,8 @@ class OdpsOSSConfig:
       logging.info('create project success!')
     except ResourceExistException:
       logging.info('project %s already exist!' % self.dhproject)
-    except Exception as ex:
-      logging.info(traceback.format_exc(ex))
+    except Exception as e:
+      logging.info(traceback.format_exc(e))
     record_schema = RecordSchema.from_lists(col, col_type)
     try:
       self.dh.create_tuple_topic(self.dhproject, self.dhtopic, 7, 3,
@@ -157,8 +153,7 @@ class OdpsOSSConfig:
       logging.info('create tuple topic success!')
     except ResourceExistException:
       logging.info('topic %s already exist!' % self.dhtopic)
-    except Exception as ex:
-      logging.error('exception:', ex)
+    except Exception:
       logging.error(traceback.format_exc())
     try:
       self.dh.wait_shards_ready(self.dhproject, self.dhtopic)
