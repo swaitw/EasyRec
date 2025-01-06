@@ -4,7 +4,7 @@
 
 ![intro.png](../images/intro.png)
 
-### EasyRec is an easy to use framework for Recommendation
+### EasyRec is an easy-to-use framework for Recommendation
 
 EasyRec implements state of the art machine learning models used in common recommedation tasks: candidate generation(matching), scoring(ranking), and multi-task learning. It improves the efficiency of generating high performance models by simple configuration and hyper parameter tuning(HPO).
 
@@ -46,9 +46,10 @@ EasyRec implements state of the art machine learning models used in common recom
 
 ### A variety of models
 
-- [DSSM](models/dssm.md) / [MIND](models/mind.md) / [DropoutNet](models/dropoutnet.md) / [CoMetricLearningI2I](models/co_metric_learning_i2i.md)
+- [DSSM](models/dssm.md) / [MIND](models/mind.md) / [DropoutNet](models/dropoutnet.md) / [CoMetricLearningI2I](models/co_metric_learning_i2i.md) / [PDN](models/pdn.md)
 - [W&D](models/wide_and_deep.md) / [DeepFM](models/deepfm.md) / [MultiTower](models/multi_tower.md) / [DCN](models/dcn.md) / [DIN](models/din.md) / [BST](models/bst.md)
 - [MMoE](models/mmoe.md) / [ESMM](models/esmm.md) / [DBMTL](models/dbmtl.md) / [PLE](models/ple.md)
+- [CMBF](models/cmbf.md) / [UNITER](models/uniter.md)
 - More models in development
 
 ### Easy to customize
@@ -60,4 +61,7 @@ EasyRec implements state of the art machine learning models used in common recom
 
 - Run [`knn algorithm`](vector_retrieve.md) of vectors in distribute environment
 
-欢迎加入【EasyRec推荐算法交流群】，钉钉群号 : 32260796
+### Contact
+
+- DingDing Group: 32260796. (EasyRec usage general discussion.)
+- DingDing Group: 37930014162, click [this url](https://qr.dingtalk.com/action/joingroup?code=v1,k1,oHNqtNObbu+xUClHh77gCuKdGGH8AYoQ8AjKU23zTg4=&_dt_no_comment=1&origin=11) or scan QrCode to join![new_group.jpg](../images/qrcode/new_group.jpg)

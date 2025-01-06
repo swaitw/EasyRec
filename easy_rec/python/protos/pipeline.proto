@@ -8,6 +8,7 @@ import "easy_rec/python/protos/dataset.proto";
 import "easy_rec/python/protos/feature_config.proto";
 import "easy_rec/python/protos/easy_rec_model.proto";
 import "easy_rec/python/protos/data_source.proto";
+import "easy_rec/python/protos/hive_config.proto";
 
 // EasyRecConfig: the pipeline_config, including all sub configs
 
@@ -16,11 +17,17 @@ message EasyRecConfig {
       string train_input_path = 1;
       KafkaServer kafka_train_input = 2;
       DatahubServer datahub_train_input = 12;
+      HiveConfig hive_train_input = 101;
+      BinaryDataInput binary_train_input = 102;
+      string parquet_train_input = 103;
   }
   oneof eval_path {
       string eval_input_path = 3;
       KafkaServer kafka_eval_input = 4;
       DatahubServer datahub_eval_input = 13;
+      HiveConfig hive_eval_input= 201;
+      BinaryDataInput binary_eval_input = 202;
+      string parquet_eval_input = 203;
   }
   required string model_dir = 5;
 
@@ -40,5 +47,15 @@ message EasyRecConfig {
 
   optional ExportConfig export_config = 15;
 
+  // Json file[RTP FG] to define input data and features:
+  // * In easy_rec.python.utils.fg_util.load_fg_json_to_config:
+  //   data_config and feature_config will be generated
+  //   based on fg_json.
+  // * After generation, a prefix '!' is added:
+  //   fg_json_path = '!' + fg_json_path
+  //   indicates config update is already done, and should not
+  //   be updated anymore. In this way, we make load_fg_json_to_config
+  //   function reentrant.
+  // This step is done before edit_config_json to take effect.
   optional string fg_json_path = 16;
 }

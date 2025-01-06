@@ -388,3 +388,45 @@ def assert_rank(tensor, expected_rank, name=None):
         'For the tensor `%s` in scope `%s`, the actual rank '
         '`%d` (shape = %s) is not equal to the expected rank `%s`' %
         (name, scope_name, actual_rank, str(tensor.shape), str(expected_rank)))
+
+
+def truncate_sequence(seq_emb, seq_len, limited_len):
+
+  def truncate(seq_embed, seq_length):
+    seq_embed = tf.slice(seq_embed, [0, 0, 0],
+                         [shape[0], limited_len, shape[2]])
+    seq_length = tf.where(
+        tf.greater(seq_length, limited_len),
+        tf.ones_like(seq_length) * limited_len, seq_length)
+    return seq_embed, seq_length
+
+  def keep(seq_embed, seq_length):
+    return seq_embed, seq_length
+
+  shape = get_shape_list(seq_emb)
+  max_seq_len = shape[1]
+
+  return tf.cond(max_seq_len > limited_len, lambda: truncate(seq_emb, seq_len),
+                 lambda: keep(seq_emb, seq_len))
+
+
+def pad_or_truncate_sequence(seq_emb, seq_len, fixed_len):
+  padding_length = fixed_len - tf.shape(seq_emb)[1]
+
+  def padding():
+    paddings = tf.stack([[0, 0], [0, padding_length], [0, 0]])
+    padded = tf.pad(seq_emb, paddings)
+    return padded, seq_len
+
+  def truncate():
+    sliced = tf.slice(seq_emb, [0, 0, 0], [-1, fixed_len, -1])
+    length = tf.where(seq_len < fixed_len, seq_len,
+                      tf.ones_like(seq_len) *
+                      fixed_len) if seq_len is not None else None
+    return sliced, length
+
+  def keep():
+    return seq_emb, seq_len
+
+  return tf.cond(padding_length > 0, padding,
+                 lambda: tf.cond(padding_length < 0, truncate, keep))

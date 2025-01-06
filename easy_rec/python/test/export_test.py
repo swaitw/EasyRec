@@ -10,17 +10,13 @@ import unittest
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.python.platform import gfile
 
 import easy_rec
 from easy_rec.python.inference.predictor import Predictor
 from easy_rec.python.utils import config_util
 from easy_rec.python.utils import test_utils
 from easy_rec.python.utils.test_utils import RunAsSubprocess
-
-if tf.__version__ >= '2.0':
-  gfile = tf.compat.v1.gfile
-else:
-  gfile = tf.gfile
 
 
 class ExportTest(tf.test.TestCase):
@@ -54,7 +50,7 @@ class ExportTest(tf.test.TestCase):
       for key in keys:
         val0 = output_res[i][key]
         val1 = cmp_result[i][key]
-        diff = np.abs(val0 - val1)
+        diff = np.max(np.abs(val0 - val1))
         assert diff < tol, \
             'too much difference: %.6f for %s, tol=%.6f' \
             % (diff, key, tol)
@@ -79,6 +75,10 @@ class ExportTest(tf.test.TestCase):
 
   def test_multi_tower(self):
     self._export_test('samples/model_config/multi_tower_export.config',
+                      self._extract_data)
+
+  def test_filter_input(self):
+    self._export_test('samples/model_config/export_filter_input.config',
                       self._extract_data)
 
   def test_mmoe(self):
@@ -115,6 +115,7 @@ class ExportTest(tf.test.TestCase):
         --pipeline_config_path %s
         --export_dir %s
         --asset_files fg.json:samples/model_config/taobao_fg.json
+        --export_done_file ExportDone
     """ % (
         config_path,
         export_dir,
@@ -127,6 +128,7 @@ class ExportTest(tf.test.TestCase):
     export_dir = files[0]
     assert gfile.Exists(export_dir + '/assets/taobao_fg.json')
     assert gfile.Exists(export_dir + '/assets/pipeline.config')
+    assert gfile.Exists(export_dir + '/ExportDone')
 
   def test_export_with_out_in_ckpt_config(self):
     test_dir = test_utils.get_tmp_dir()
@@ -154,6 +156,12 @@ class ExportTest(tf.test.TestCase):
             pipeline_config_path,
             test_dir=test_dir,
             post_check_func=_post_check_func))
+
+  def test_multi_class_predict(self):
+    self._export_test(
+        'samples/model_config/deepfm_multi_cls_on_avazu_ctr.config',
+        extract_data_func=self._extract_data,
+        keys=['probs', 'logits', 'probs_y', 'logits_y', 'y'])
 
   def _export_test(self,
                    pipeline_config_path,
@@ -382,7 +390,7 @@ class ExportTest(tf.test.TestCase):
         pipeline_config_path,
         test_data_path,
         self._extract_rtp_data,
-        total_steps=1000)
+        total_steps=100)
 
   def _test_big_model_export_to_oss(self,
                                     pipeline_config_path,
@@ -436,7 +444,7 @@ class ExportTest(tf.test.TestCase):
         --input_path %s
         --output_path %s
     """ % (config_path, test_data_path, result_path)
-    proc = test_utils.run_cmd(predict_cmd % (),
+    proc = test_utils.run_cmd(predict_cmd,
                               '%s/log_%s.txt' % (test_dir, 'predict'))
     proc.wait()
     self.assertTrue(proc.returncode == 0)

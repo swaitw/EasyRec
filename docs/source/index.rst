@@ -18,9 +18,21 @@ Welcome to easy_rec's documentation!
    :caption: DATA & FEATURE
 
    feature/data
+   feature/odl_sample.md
    feature/feature
    feature/excel_config
    feature/rtp_fg
+   feature/rtp_native
+
+.. toctree::
+   :maxdepth: 3
+   :caption: BACKBONE & COMPONENT
+
+   component/backbone
+   component/component
+   component/sequence
+   component/custom_loss
+   component/custom_op
 
 .. toctree::
    :maxdepth: 3
@@ -30,6 +42,7 @@ Welcome to easy_rec's documentation!
    models/rank
    models/multi_target
    models/user_define
+   models/loss
 
 .. toctree::
    :maxdepth: 2
@@ -37,23 +50,30 @@ Welcome to easy_rec's documentation!
 
    train
    incremental_train
+   online_train
    eval
    export
    kd
    optimize
+   pre_check
 
 .. toctree::
    :maxdepth: 2
    :caption: PREDICT
 
+   predict/input_output
    predict/MaxCompute 离线预测
    predict/Local 离线预测
    predict/在线预测
+   predict/processor
+   feature/rtp_native
+   vector_retrieve
 
 .. toctree::
    :maxdepth: 2
    :caption: AUTOML
 
+   automl/pai_nni_hpo
    automl/hpo_pai
    automl/hpo_emr
    automl/auto_cross_emr
@@ -77,6 +97,7 @@ Welcome to easy_rec's documentation!
    :caption: DEVELOP
 
    develop
+   pycharm_vscode_docker
    release
 
 .. toctree::
@@ -85,10 +106,12 @@ Welcome to easy_rec's documentation!
 
    reference
    metrics
+   benchmark
    faq
-   tf_on_yarn
    get_role_arn
-
+   tf_on_yarn
+   emr_tensorboard
+   mnist_demo
 
 
 Indices and tables

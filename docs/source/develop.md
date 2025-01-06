@@ -36,35 +36,83 @@ pre-commit install
 pre-commit run -a
 ```
 
+### 增加新的运行命令（cmd）
+
+增加新的运行命令需要修改`xflow`的配置和脚本，文件位置：
+
+- 弹内用户： `pai_jobs/easy_rec_flow`
+- 公有云用户：`pai_jobs/easy_rec_flow_ex`
+
+升级xflow对外发布之前，需要严格测试，影响面很大，会影响所有用户。
+
+更建议的方式是不增加新的运行命令，新增功能通过`cmd=custom`命令来运行，通过`entryFile`参数指定新增功能的运行脚本，
+需要额外参数时，通过`extra_params`参数传递。示例如下：
+
+```
+pai -name easy_rec_ext
+  -Dcmd='custom'
+  -DentryFile='easy_rec/python/tools/feature_selection.py'
+  -Dextra_params='--topk 1000'
+```
+
 ### 测试
 
 #### 单元测试
 
 ```bash
-TEST_DEVICES=0,1 sh scripts/ci_test.sh
+sh scripts/ci_test.sh
+```
+
+- 运行单个测试用例
+
+```bash
+TEST_DEVICES='' python -m easy_rec.python.test.train_eval_test TrainEvalTest.test_tfrecord_input
 ```
 
 #### Odps 测试
 
 ```bash
-TEMPDIR=/tmp python -m easy_rec.python.test.odps_run --oss_config ~/.ossutilconfig [--odps_config {ODPS_CONFIG} --algo_project {ALOG_PROJ}  --arn acs:ram::xxx:role/yyy TestPipelineOnOdps.*]
+TMPDIR=/tmp python -m easy_rec.python.test.odps_run --oss_config ~/.ossutilconfig [--odps_config {ODPS_CONFIG} --algo_project {ALOG_PROJ}  --arn acs:ram::xxx:role/yyy TestPipelineOnOdps.*]
 ```
 
 #### 测试数据
 
-下载测试数据
+测试数据放在data/test目录下面, remote存储在oss://easyrec bucket里面, 使用git-lfs组件管理测试数据.
 
-```bash
-wget https://easyrec.oss-cn-beijing.aliyuncs.com/data/easyrec_data_20210818.tar.gz
-tar -xvzf easyrec_data_20210818.tar.gz
-```
+- 从remote同步数据:
 
-如果您要添加新数据，请在“git commit”之前执行以下操作,以将其提交到 git-lfs：
+  ```bash
+  python git-lfs/git_lfs.py pull
+  ```
+
+- 增加新数据:
+
+- git-lfs配置文件: .git_oss_config_pub
+
+  ```yaml
+  bucket_name = easyrec
+  git_oss_data_dir = data/git_oss_sample_data
+  host = oss-cn-beijing.aliyuncs.com
+  git_oss_cache_dir = ${TMPDIR}/${PROJECT_NAME}/.git_oss_cache
+  git_oss_private_config = ~/.git_oss_config_private
+  ```
+
+  - bucket_name: 数据存储的oss bucket, 默认是easyrec
+  - git_oss_data_dir: oss bucket内部的存储目录
+  - host: oss bucket对应的endpoint
+  - git_oss_cache_dir: 更新数据时使用的本地的临时dir
+  - git_oss_private_config: [ossutil](https://help.aliyun.com/document_detail/120075.html)对应的config，用于push数据到oss bucket.
+    - 考虑到安全问题, oss://easyrec暂不开放提交数据到oss的权限
+    - 如需要提交测试数据, 可以先提交到自己的oss bucket里面, 等pull requst merge以后，再同步到oss://easyrec里面.
+
+- git-lfs提交命令:
 
 ```bash
 python git-lfs/git_lfs.py add data/test/new_data
 python git-lfs/git_lfs.py push
 ```
+
+git-commit也会自动调用pre-commit hook, 执行git_lfs.py push操作.
 
 ### 文档
 
@@ -73,18 +121,21 @@ python git-lfs/git_lfs.py push
 如果文档包含公式或表格，我们建议您使用 reStructuredText 格式或使用
 [md-to-rst](https://cloudconvert.com/md-to-rst) 将现有的 Markdown 文件转换为 reStructuredText 。
 
-**构建文档** # 在python3环境下运行
+**构建文档**
 
 ```bash
+# 在python3环境下运行
 bash scripts/build_docs.sh
 ```
 
 ### 构建安装包
 
-构建pip包
+**构建pip包**
 
 ```bash
 python setup.py sdist bdist_wheel
 ```
 
-### [部署](./release.md)
+### 部署
+
+- MaxCompute和DataScience[部署文档](./release.md)

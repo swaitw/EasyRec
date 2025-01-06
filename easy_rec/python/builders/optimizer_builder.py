@@ -88,6 +88,14 @@ def build(optimizer_config):
         beta1=config.beta1,
         beta2=config.beta2)
 
+  if optimizer_type == 'lazy_adam_optimizer':
+    config = optimizer_config.lazy_adam_optimizer
+    learning_rate = _create_learning_rate(config.learning_rate)
+    summary_vars.append(learning_rate)
+    from easy_rec.python.compat.adam_s import AdamOptimizerS
+    optimizer = AdamOptimizerS(
+        learning_rate=learning_rate, beta1=config.beta1, beta2=config.beta2)
+
   if optimizer_type == 'momentumw_optimizer':
     config = optimizer_config.momentumw_optimizer
     learning_rate = _create_learning_rate(config.learning_rate)
@@ -103,7 +111,9 @@ def build(optimizer_config):
     config = optimizer_config.adagrad_optimizer
     learning_rate = _create_learning_rate(config.learning_rate)
     summary_vars.append(learning_rate)
-    optimizer = tf.train.AdagradOptimizer(learning_rate)
+    optimizer = tf.train.AdagradOptimizer(
+        learning_rate,
+        initial_accumulator_value=config.initial_accumulator_value)
 
   if optimizer_type == 'adam_async_optimizer':
     config = optimizer_config.adam_async_optimizer

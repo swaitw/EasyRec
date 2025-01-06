@@ -1,10 +1,12 @@
 # RTP FG
 
-- RTP FG能够以比较高的效率生成一些复杂的特征，如MatchFeature和LookupFeature, 线上线下使用同一套代码保证一致性.
+- RTP FG: RealTime Predict Feature Generation, 解决实时预测需要的特征工程需求. 特征工程在推荐链路里面也占用了比较长的时间.
+
+- RTP FG能够以比较高的效率生成一些复杂的交叉特征，如match feature和lookup feature.离线训练和在线预测的时候通过使用同一套c++代码保证离线在线的一致性.
 
 - 其生成的特征可以接入EasyRec进行训练，从RTP FG的配置(fg.json)可以生成EasyRec的配置文件(pipeline.config).
 
-- 线上部署的时候提供带FG功能的EAS processor，一键部署.
+- 线上部署的时候提供带FG功能的[EasyRec Processor](../predict/processor.md)一键部署.
 
 ### 训练
 
@@ -28,22 +30,23 @@
 
  "reserves": [
    "user_id", "campaign_id", "clk"
- ],
- "multi_val_sep": "|"
+ ]
 }
 ```
 
 - Feature配置说明：
 
-  - [IdFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/IdFeature.pdf)
+  - [id_feature](./fg_docs/IdFeature.md)
 
     - is_multi: id_feature是否是多值属性
 
-      - 默认是false, 转换成EasyRec的config时会转成IdFeature
+      - 默认是true, 转换成EasyRec的config时会转成TagFeature
 
-      - 如果设成true, 转换成EasyRec的config时会转成TagFeature.
+      - 如果设成false, 转换成EasyRec的config时会转成IdFeature, 可以减少字符串分割的开销
 
-      - 多值分隔符使用chr(29)\[ctrl+v ctrl+\].
+      - 多值分隔符使用chr(29)\[ctrl+v ctrl+\], 即"\\u001D".
+
+      - [多值类型说明](./fg_docs/mutiValues.md)
 
     - vocab_file: 词典文件路径，根据词典将对应的输入映射成ID.
 
@@ -59,7 +62,7 @@
 
     - embedding_dimension/embedding_dim: 对应EasyRec feature_config.features里面的embedding_dim.
 
-  - [RawFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/RawFeature.pdf)
+  - [raw_feature](./fg_docs/RawFeature.md)
 
     - bucketize_boundaries: 会生成离散化的结果, 在生成EasyRec config的时候:
 
@@ -89,16 +92,14 @@
 
       - 比如ctr_1d,ctr_2d,ctr_3d,ctr_12d可以放在一个RawFeature里面.
       - 该选项对生成数据有影响.
-      - 该选项对生成EasyRec config也有影响.
+      - 该选项对生成EasyRec config也有影响, 对应到[feature_config.raw_input_dim](../proto.html#protos.FeatureConfig)
 
-  - [ComboFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/ComboFeature.pdf)
+  - [combo_feature](./fg_docs/ComboFeature.md)
 
     - 需要设置embedding_dimension和hash_bucket_size.
-      方法一：在fg中生成combo特征，见[ComboFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/ComboFeature.pdf)
+      方法一：在fg中生成combo特征，见[combo_feature](./fg_docs/ComboFeature.md)
 
     ```
-    {"expression": "user:user_id", "feature_name": "user_id", "feature_type":"id_feature", "value_type":"String", "combiner":"mean", "hash_bucket_size": 100000, "embedding_dim": 16, "group":"user"},
-    {"expression": "user:occupation", "feature_name": "occupation", "feature_type":"id_feature", "value_type":"String", "combiner":"mean", "hash_bucket_size": 10, "embedding_dim": 16, "group":"user"},
     {"expression" : ["user:user_id", "user:occupation"], "feature_name" : "combo__occupation_age_level", "feature_type" : "combo_feature", "hash_bucket_size": 10, "embedding_dim": 16}
 
     ```
@@ -118,20 +119,20 @@
      }
     ```
 
-    - 最终会生成两列数据（user_id和occupation），config中生成三个特征配置，分别是user_id，occupation，combo\_\_occupation_age_level.
+    - 最终会生成两列数据（user_id和occupation），config中生成三个特征的配置，分别是user_id，occupation，combo\_\_occupation_age_level.
     - final_feature_name: 该combo特征的名字.
     - feature_names: 除当前特征外，参与combo的特征，至少一项.
     - combiner, hash_bucket_size, embedding_dim 配置与上述一致.
 
-  - [LookupFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/LookupFeature.pdf)
+  - [lookup_feature](./fg_docs/LookupFeature.md)
 
-    - 根据id查找对应的value.
+    - 单层查找, 根据id(如item_id, item_category_id等)查找对应的value.
 
-  - [MatchFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/MatchFeature.pdf)
+  - [match_feature](./fg_docs/MatchFeature.md)
 
     - 双层查找, 根据category和item_id查找value.
 
-    - match Feature里面多值分隔符可以使用chr(29) (ctrl+v ctrl+\])或者逗号\[,\]， 如:
+    - match feature里面多值分隔符可以使用chr(29) (ctrl+v ctrl+\])或者逗号\[,\]， 如:
 
     ```
       50011740^107287172:0.2^]36806676:0.3^]122572685:0.5|50006842^16788816:0.1^]10122:0.2^]29889:0.3^]30068:19
@@ -139,9 +140,27 @@
 
     - needWeighting: 生成特征权重，即kv格式, kv之间用\[ctrl+v ctrl+e\]分割, 转换成TagFeature.
 
-  - [OverLapFeature](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/OverLapFeature.pdf)
+  - [sequence_feature](./fg_docs/SequenceFeature.md)
 
-  - 所有feature都需要的字段:
+    - 序列特征用于对用户行为建模, 通常应用于DIN和Transformer模型当中
+
+    - sequence_pk: 行为序列的特征名, 如点击序列, 购买序列等, 一般保存在item侧, 如user:clk_seq_50
+
+      - 离线格式: item_id和属性拼在一起, 通过#分隔
+
+        - 示例: item\_\_id:11#item\_\_price:2.0;item_id:22#item\_\_price:4.0
+
+      - 在线格式: 只保留item_id
+
+        - 示例: 11;22
+
+    - sequence_table: 一般都是item, online serving时从item表中根据item_id查询item信息, 离线时没有用
+
+    - Note: item_seq(如item的图片列表)目前还不支持
+
+  - [overlap_feature](./fg_docs/OverLapFeature.md)
+
+  - 针对EasyRec的扩展字段:
 
     - group: feature所属的分组
 
@@ -152,10 +171,6 @@
     - combiner: 默认是mean, 也可以是sum.
 
       - 影响数据生成和 EasyRec feature_config 生成, 主要是多值Feature.
-
-    - [多值类型说明](http://easyrec.oss-cn-beijing.aliyuncs.com/fg_docs/%E5%A4%9A%E5%80%BC%E7%B1%BB%E5%9E%8B.pdf)
-
-      - 多值feature使用chr(29)\[ctrl+v ctrl+\]\]作为分隔符.
 
 - 全局配置说明:
 
@@ -169,8 +184,6 @@
     ```
     i_item_id:10539078362,i_seller_id:21776327,...
     ```
-
-  - multi_val_sep: 多值特征的分隔符，不指定默认是chr(29) 即"\\u001D"
 
   - kv_separator: 多值有权重特征的分隔符，如”体育:0.3|娱乐:0.2|军事:0.5”，不指定默认None，即没有权重
 
@@ -210,16 +223,11 @@
 | ----- | ------- | ------- | --------------- | --------------------------------------------------------------- | -------------------------------------------------- |
 | 0     | 122017  | 389957  |                 | tag_category_list:4589,new_user_class_level:,...,user_id:122017 | adgroup_id:539227,pid:430548_1007,...,cate_id:4281 |
 
-```sql
--- taobao_train_input.txt oss://easyrec/data/rtp/
--- wget http://easyrec.oss-cn-beijing.aliyuncs.com/data/rtp/taobao_train_input.txt
--- wget http://easyrec.oss-cn-beijing.aliyuncs.com/data/rtp/taobao_test_input.txt
-drop table if exists taobao_train_input;
-create table if not exists taobao_train_input(`label` BIGINT,user_id STRING,item_id STRING,context_feature STRING,user_feature STRING,item_feature STRING);
-tunnel upload taobao_train_input.txt taobao_train_input -fd=';';
-drop table if exists taobao_test_input;
-create table if not exists taobao_test_input(`label` BIGINT,user_id STRING,item_id STRING,context_feature STRING,user_feature STRING,item_feature STRING);
-tunnel upload taobao_test_input.txt taobao_test_input -fd=';';
+提供了在任何项目下都可以访问两张样例表
+
+```
+pai_online_project.taobao_train_input
+pai_online_project.taobao_test_input
 ```
 
 - 稠密格式的数据，每个特征是单独的一列，如：
@@ -229,7 +237,7 @@ tunnel upload taobao_test_input.txt taobao_test_input -fd=';';
 | 1     | 122017  | 389957  | 4589              |                      | 0         |
 
 ```sql
-  drop table if exists taobao_train_input;
+  drop table if exists taobao_train_input_dense;
   create table taobao_train_input_dense(label bigint, user_id string, item_id string, tag_category_list bigint, ...);
 ```
 
@@ -241,11 +249,11 @@ tunnel upload taobao_test_input.txt taobao_test_input -fd=';';
 
 #### 生成样本
 
-- 下载rtp_fg [jar ](https://easyrec.oss-cn-beijing.aliyuncs.com/deploy/fg_on_odps-1.3.57-jar-with-dependencies.jar)包
+- 下载rtp_fg [jar ](https://easyrec.oss-cn-beijing.aliyuncs.com/deploy/fg_on_odps-1.3.59-jar-with-dependencies.jar)包
 - 生成特征
 
 ```sql
-add jar target/fg_on_odps-1.3.57-jar-with-dependencies.jar -f;
+add jar target/fg_on_odps-1.3.59-jar-with-dependencies.jar -f;
 add file fg.json -f;
 
 set odps.sql.planner.mode=sql;
@@ -254,10 +262,14 @@ set odps.sql.counters.dynamic.limit=true;
 
 drop table if exists taobao_fg_train_out;
 create table taobao_fg_train_out(label bigint, user_id string, item_id string,  features string);
-jar -resources fg_on_odps-1.3.57-jar-with-dependencies.jar,fg.json -classpath fg_on_odps-1.3.57-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i taobao_train_input -o taobao_fg_train_out -f fg.json;
+-- dataworks内运行，注意需要带有resource_reference这一行
+--@resource_reference{"fg_on_odps-1.3.59-jar-with-dependencies.jar"}
+jar -resources fg_on_odps-1.3.59-jar-with-dependencies.jar,fg.json -classpath fg_on_odps-1.3.59-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i pai_online_project.taobao_train_input -o taobao_fg_train_out -f fg.json;
 drop table if exists taobao_fg_test_out;
 create table taobao_fg_test_out(label bigint, user_id string, item_id string,  features string);
-jar -resources fg_on_odps-1.3.57-jar-with-dependencies.jar,fg.json -classpath fg_on_odps-1.3.57-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i taobao_test_input -o taobao_fg_test_out -f fg.json;
+-- dataworks内运行，注意需要带有resource_reference这一行
+--@resource_reference{"fg_on_odps-1.3.59-jar-with-dependencies.jar"}
+jar -resources fg_on_odps-1.3.59-jar-with-dependencies.jar,fg.json -classpath fg_on_odps-1.3.59-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i pai_online_project.taobao_test_input -o taobao_fg_test_out -f fg.json;
 
 --下载查看数据(可选)
 tunnel download taobao_fg_test_out taobao_fg_test_out.txt -fd=';';
@@ -268,6 +280,7 @@ tunnel download taobao_fg_test_out taobao_fg_test_out.txt -fd=';';
     - 支持分区表，分区表可以指定partition，也可以不指定partition，不指定partition时使用所有partition
     - **分区格式示例:** my_table/day=20201010,sex=male
     - 可以用多个-i指定**多个表的多个分区**
+    - 支持添加project，示例：project.table/ds=xxx
   - -o, 输出表，如果是分区表，一定要指定分区，只能指定一个输出表
   - -f, fg.json
   - -m, mapper memory的大小，默认可以不设置
@@ -310,26 +323,28 @@ python -m easy_rec.python.tools.convert_rtp_fg  --label is_product_detail is_pur
 
 - --output_path: 输出的EasyRec config路径
 
-- --separator: feature之间的分隔符, 默认是CTRL_B(\\u0002)
+- --separator: feature之间的分隔符, 默认是CTRL_B(u0002)
 
-- --selected_cols: 指定输入列，包括label和features，其中label可以指定多列，表示要使用多个label(一般是多任务模型),  最后一列必须是features, 如:
-
-  ```
-  label0,label1,features
-  ```
-
-  - 注意不要有**空格**
-
-- --incol_separator: feature内部的分隔符，即多值分隔符，默认是CTRL_C(\\u0003)
-
-- --input_type: 输入类型，默认是OdpsRTPInput, 如果在EMR上使用或者本地使用，应该用RTPInput, 如果使用RTPInput那么--selected_cols也需要进行修改, 使用对应的列的id:
+- --selected_cols: 指定输入列，包括label、\[sample_weight\]和features，其中label可以指定多列，表示要使用多个label(一般是多任务模型),  最后一列必须是features, 如:
 
   ```
-  0,4
+  label0,label1,sample_weight,features
   ```
 
-  - 其中第0列是label, 第4列是features
-  - 还需要指定--rtp_separator，表示label和features之间的分隔符, 默认是";"
+  - 注意不要有**空格**，其中 sample_weight 列是可选的，可以没有
+
+- --incol_separator: feature内部的分隔符，即多值分隔符，默认是CTRL_C(u0003)
+
+- --input_type: 输入类型
+
+  - OdpsRTPInput表示在MaxCompute上使用;
+  - RTPInput, 本地使用, 使用RTPInput时需要指定训练时用到的对应的列的id, 如:
+    ```
+    --selected_cols=0,4
+    ```
+    - 其中第0列是label, 第4列是features
+    - 还需要指定--rtp_separator，表示label和features之间的分隔符, 默认是";"
+  - HiveRTPInput, 用于在DataScience上使用
 
 - --train_input_path, 训练数据路径
 
@@ -346,9 +361,11 @@ python -m easy_rec.python.tools.convert_rtp_fg  --label is_product_detail is_pur
 
 ```sql
 pai -name easy_rec_ext
--Dconfig=oss://bucket-name/easy_rec_test/fg.config
+-Dversion='0.4.5'
 -Dcmd=train
--Dtables='odps://project-name/tables/taobao_fg_train_out,odps://project-name/tables/taobao_fg_test_out'
+-Dconfig=oss://bucket-name/easy_rec_test/fg.config
+-Dtrain_tables=odps://project-name/tables/taobao_fg_train_out
+-Deval_tables=odps://project-name/tables/taobao_fg_test_out
 -Dcluster='{"ps":{"count":1, "cpu":1000}, "worker" : {"count":3, "cpu":1000, "gpu":100, "memory":40000}}'
 -Darn=acs:ram::xxx:role/ev-ext-test-oss
 -Dbuckets=oss://bucket-name/
@@ -356,45 +373,38 @@ pai -name easy_rec_ext
 -Deval_method=separate;
 ```
 
-环境里没有安装easy_rec_ext ，则上传easy_rec.tar.gz包
-
-```
-pai -name tensorflow1120_cpu_ext
-    -Dscript='oss://<path>/easy_rec.tar.gz'
-    -DentryFile='run.py'
-    -Dbuckets='oss://<bucket-name>/'
-    -Dtables='odps://<project-name>/tables/<train_table_name>/dt=${bizdate},odps://<project-name>/tables/<test_table_name>/dt=${bizdate}'
-    -Darn='acs:ram::xxx:role/aliyunodpspaidefaultrole'
-    -DossHost='oss-us-west-1-internal.aliyuncs.com'
-    -Dcluster='{
-      \"ps\": {
-          \"count\" : 4,
-          \"cpu\" : 600,
-          \"memory\" : 30000
-      },
-      \"worker\" : {
-          \"count\" : 33,
-          \"cpu\" : 800,
-          \"memory\" : 30000
-      }
-    }'
-    -DuserDefinedParameters='--cmd train --config oss://<path>/fg.config --model_dir oss://<model_path>/ --train_tables odps://<project-name>/tables/<train_table_name>/dt=${bizdate} --eval_tables odps://<project-name>/tables/<test_table_name>/dt=${bizdate} --with_evaluator'
-;
-```
+- 参数说明: [请参考](../train.md#on-pai)
 
 #### 模型导出
 
 ```sql
-pai -name tensorflow1120_cpu_ext
-    -Dscript='oss://<path>/easy_rec.tar.gz'
-    -DentryFile='run.py'
-    -Dbuckets='oss://<bucket-name>/'
-    -Darn='acs:ram::xxx:role/aliyunodpspaidefaultrole'
-    -DossHost='oss-us-west-1-internal.aliyuncs.com'
-    -DuserDefinedParameters='--cmd export --config=oss://<model_path>/pipeline.config --export_dir=oss://<export_path>/ --asset_files=oss://<path>/fg.json';
-;
+pai -name easy_rec_ext
+    -Dversion='0.4.5'
+    -Dcmd=export
+    -Dconfig=oss://easyrec/easy_rec_test/fg.config
+    -Dexport_dir=oss://<bucket-name>/export_dir
+    -Dbuckets=oss://<bucket-name>/
+    -Darn=acs:ram::xxx:role/aliyunodpspaidefaultrole
+    -DossHost=oss-hangzhou-internal.aliyuncs.com
+    -Dedit_config_json='{"export_config.multi_placeholder":true, "feature_config.features[:].max_partitions":1}';
 
 ```
+
+- 参数说明: [请参考](../export.md#pai)
+- 注意事项:
+  - 请检查fg.config, 保证导出的模型是支持多个placeholder的输入\[每个特征一个placeholder\]
+
+    ```
+    export_config {
+      multi_placeholder: true
+    }
+    ```
+
+    如果不是, 可以通过-Dedit_config_json='{"export_config.multi_placeholder":true}' 进行修改
+
+  - 如果有设置feature_config.features.max_partitions, 请加入下面的命令重置:
+
+    - -Dedit_config_json='{"feature_config.features\[:\].max_partitions":1}'进行修改, 可以获得更好的性能
 
 #### 增加特征
 
@@ -410,7 +420,7 @@ pai -name tensorflow1120_cpu_ext
 - 表C使用增量incre_fg.json生成表incre_fea_table, incre_fg.json定义了新增的特征
 
 ```
-  jar -resources fg_on_odps-1.3.57-jar-with-dependencies.jar,incre_fg.json -classpath fg_on_odps-1.3.57-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i taobao_test_input -o taobao_fg_test_out -f incre_fg.json;
+  jar -resources fg_on_odps-1.3.59-jar-with-dependencies.jar,incre_fg.json -classpath fg_on_odps-1.3.59-jar-with-dependencies.jar com.taobao.fg_on_odps.EasyRecFGMapper -i taobao_test_input -o taobao_fg_test_out -f incre_fg.json;
 ```
 
 - 生成新的样本表D:
@@ -441,186 +451,112 @@ pai -name tensorflow1120_cpu_ext
 bizdate=$1
 cat << EOF > echo.json
 {
-  "name":"easyrec_processor",
-  "baseimage": "registry.cn-shanghai.aliyuncs.com/eas/eas-worker-amd64:0.4.22",
+  "name":"ali_rec_rnk",
   "metadata": {
-    "region": "us-west-1",
-    "cpu": 6,
+    "resource": "eas-r-xxxx",
+    "cpu": 8,
     "memory": 20000,
-    "instance": 3
+    "instance": 2,
+    "rpc": {
+      "enable_jemalloc": 1,
+      "max_queue_size": 100
+    }
   },
-  "model_config":"{\"holo-conf\":{\"url\":\"postgresql://<AccessKeyID>:<AccessKeySecret>@<域名>:<port>/<database>\",\"prefix\":\"fg_*\",\"table\" : [{\"name\": \"<schema>.<table_name>\",\"key\" : \"<index_column_name>\",\"value\": \"<column_name>\",\"period\": 2880}]},\"period\": 2880,\"fg\":true,\"multitargets\":true,\"outputs\":\"probs_ctr,probs_cvr\",\"inter_op_parallelism_threads\": 6, \"intra_op_parallelism_threads\": 6, \"fg_ins_num\":2}",
-  "model_path": "oss://<model_path>/",
-  "processor_path": "oss://easyrec/deploy/processor/easyrec_holo_broadwell.tar.gz",
-  "processor_entry": "libtf_predictor.so",
-  "token": "Y2E4OGY2MTBkODFhMzJhMDUzODM0YmE4OGRjZTI2MTgxYWNhOWRkNw==",
-  "processor_type": "cpp"
+  "model_config": {
+    "remote_type": "hologres",
+    "url": "postgresql://<AccessKeyID>:<AccessKeySecret>@<域名>:<port>/<database>",
+    "tables": [{"name":"<schema>.<table_name>","key":"<index_column_name>","value": "<column_name>"}],
+    "period": 2880,
+    "fg_mode": "tf",
+    "outputs":"probs_ctr,probs_cvr",
+  },
+  "processor": "easyrec-1.5",
+  "storage": [
+    {
+      "mount_path": "/home/admin/docker_ml/workspace/model/",
+      "oss": {
+        "endpoint": "oss-cn-hangzhou-internal.aliyuncs.com",
+        "path": "oss://easyrec/ali_rec_sln_acc_rnk/20221122/export/final_with_fg"
+      }
+    }
+  ]
 }
 
 EOF
 # 执行部署命令。
-#/home/admin/usertools/tools/eascmd -i <AccessKeyID>  -k  <AccessKeySecret>   -e pai-eas.us-west-1.aliyuncs.com create echo.json
-/home/admin/usertools/tools/eascmd -i <AccessKeyID>  -k  <AccessKeySecret>   -e pai-eas.us-west-1.aliyuncs.com update easyrec_processor -s echo.json
-
-
-```
-
-训练导出的时候需要修改fg.config ，保证导出的模型是支持多个place_holder 的输入
+eascmd -i <AccessKeyID>  -k  <AccessKeySecret>   -e <EndPoint> create echo.json
+eascmd -i <AccessKeyID>  -k  <AccessKeySecret>   -e <EndPoint> update ali_rec_rnk -s echo.json
 
 ```
-export_config {
-  multi_placeholder: true
-}
-```
 
-- processor_path， processor_entry， processor_type 自定义 easyrec processor  设置，与示例保持一致即可
+- processor: easyrec processor, 目前最新的版本为easyrec-1.5, [历史版本](../predict/processor.md#release).
 
 - model_config: eas 部署配置。主要控制把 item 特征加载到内存中。目前数据源支持redis和holo
 
-  - redis-conf: 配置redis 访问的相关配置，包括 url, password
-    - prefix: item_id key的前缀, 为了和其它的key(如user_id等)区分开来
-    - cluster: cluster模式访问redis, 默认是false, 使用单例模式
-  - pool_size: redis connection pool size
   - period: item feature reload period, 单位minutes
-
-- 更多选项:
-
-  - model_config:
-    - fg_ins_num: fg并行数，可以加快fg的计算速度
-    - multitargets: 是否多目标模型
-    - outputs: saved_model output signatures, 如果有多个，之间用,分割
-
-  ```
-    "model_config":{
-      "fg_ins_num": 4,
-      "multitargets": true,
-      "outputs": "probs_ctr,probs_cvr",
-      ...
-    }
-  ```
-
-- holo-conf: 也支持使用[holo](https://www.aliyun.com/product/bigdata/hologram)存储item feature, 好处是支持增量更新
-
-  - 需要创建一张holo表, 包含3列:
-    ```
-    ｜item_id｜item_features｜update_time｜
-    ```
   - url: holo url
-  - user: holo db username
-  - password: holo db password
-  - dbname: holo dbname
-  - table: holo table name
-  - key: name of the column store item_ids
-  - value: name of the column store item features
+  - fg_mode: 支持tf和normal两种模式, tf模式表示fg是以TF算子的方式执行的, 性能更好
+  - tables: item特征存储在hologres表里面, 支持分多个表存储
+    - key: 必填, itemId列的名字;
+    - value: 可选，需要加载的列名, 多个列名之间用逗号(,)分割;
+    - condition: 可选，where子语句支持筛选item, 如itemId \< 10000;
+    - timekey: 可选，用于item的增量更新，支持的格式: timestamp和int
+    - static: 可选, 表示是静态特征，不用周期性更新
+    - 支持多个item表, 如果多张表有重复的列, 后面的表覆盖前面的表
+    - hologres表里面每一列存储一个item特征,示例:
+      <table class="docutils" border=1>
+       <tr><th>adgroup_id</th><th>cate_id</th><th>campaign_id</th><th>customer</th><th>brand</th><th>price</th></tr>
+       <tr><td>100038</td><td>5480</td><td>37448</td><td>117182</td><td>6077</td><td>4</td></tr>
+       <tr><td>100039</td><td>10344</td><td>122588</td><td>96590</td><td>14287</td><td>97</td></tr>
+       <tr><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td></tr>
+      </table>
 
-```
-  {
-    "model_config":{
-      "holo-conf":{
-        "url":"hgprecn-cn-09k22ikm5008-cn-hangzhou.hologres.aliyuncs.com",
-        "user":"admin",
-        "password":"1234567",
-        "dbname":"easyrec_test",
-        "table":"test_table",
-        "key":"item_id",
-        "value":"item_features"
-      }
-      ...
-    }
-  }
-```
+- storage: 将oss的模型目录mount到docker的指定目录下
 
-#### 客户端访问
+  - mount_path: docker内部的挂载路径, 与示例保持一致即可
+  - 配置了storage就不需要配置model_path了
+  - 优点: 部署速度快
 
-同eas sdk 中的TFRequest类似，easyrec 也是使用ProtoBuffer 作为传输协议. proto 文件定义：
+- model_path: 将模型拷贝到docker内部
 
-```protobuf
-syntax = "proto3";
+  - 缺点: 部署速度慢, 需要将模型保存到docker内部
+  - 建议仅在无法通过storage挂载的情况下使用model_path
 
-package com.alibaba.pairec.processor;
-option cc_enable_arenas = true;
-option java_package = "com.alibaba.pairec.processor";
-option java_outer_classname = "PredictProtos";
+- 其它参数是所有EAS服务通用的, 请参考[EAS文档](https://help.aliyun.com/zh/pai/user-guide/parameters-of-model-services).
 
-// context features
-message ContextFeatures {
-  repeated string features = 1;
-}
+#### 客户端请求
 
-// PBRequest specifies the request for aggregator
-message PBRequest {
-  // debug mode
-  bool debug_mode = 1;
-
-  // user features
-  map<string, string> user_features = 2;
-
-  // item ids
-  repeated string item_ids = 3;
-
-  // context features for each item
-  map<string, ContextFeatures> context_features = 4;
-}
-
-// return results
-message Results {
-  # use repeated to be compatiable for multi-target models.
-  repeated double scores = 1 [packed = true];
-}
-
-enum StatusCode {
-  OK = 0;
-  INPUT_EMPTY = 1;
-  EXCEPTION = 2;
-}
-
-// PBResponse specifies the response for aggregator
-message PBResponse {
-  // results
-  map<string, Results> results = 1;
-
-  // item features
-  map<string, string> item_features = 2;
-
-  // generate features
-  map<string, string> generate_features = 3;
-
-  // context features
-  map<string, ContextFeatures> context_features = 4;
-
-  string error_msg = 5;
-
-  StatusCode status_code = 6;
-}
-```
-
-提供了 java 的客户端实例，[客户端 jar 包地址](http://easyrec.oss-cn-beijing.aliyuncs.com/deploy/easyrec-eas-client-0.0.1-jar-with-dependencies.jar).
-下载后的 jar 通过下面命令安装到本地 mvn 库里.
-
-```
-mvn install:install-file -Dfile=easyrec-eas-client-0.0.1-jar-with-dependencies.jar -DgroupId=com.alibaba.pairec -DartifactId=easyrec-eas-client -Dversion=0.0.1 -Dpackaging=jar
-```
-
-然后在pom.xml里面加入:
+和TFRequest类似, EasyRec Processor也是使用ProtoBuffer 作为传输协议. [proto文件定义](https://github.com/pai-eas/eas-java-sdk/blob/master/src/main/proto/easyrec_predict.proto). Java客户端可以通过PAI-EAS Java SDK调用服务, 在pom.xml里面加入:
 
 ```
 <dependency>
-    <groupId>com.alibaba.pairec</groupId>
-    <artifactId>easyrec-eas-client</artifactId>
-    <version>0.0.1</version>
+  <groupId>com.aliyun.openservices.eas</groupId>
+  <artifactId>eas-sdk</artifactId>
+  <version>2.0.9</version>
 </dependency>
 ```
 
-java 客户端测试代码参考：
+代码参考：
 
 ```java
-import com.alibaba.pairec.processor.client.*;
+import com.aliyun.openservices.eas.predict.http.*;
+import com.aliyun.openservices.eas.predict.request.EasyRecRequest;
 
-PaiPredictClient client = new PaiPredictClient(new HttpConfig());
-client.setEndpoint(cmd.getOptionValue("e"));
-client.setModelName(cmd.getOptionValue("m"));
+PredictClient client = new PredictClient(new HttpConfig());
 
-EasyrecRequest easyrecRequest = new EasyrecRequest(separator);
+// 使用网络直连功能, 为了提升吞吐降低RT, 建议使用网络直连
+// Endpoint需要根据相应的region进行修改
+client.setDirectEndpoint("pai-eas-vpc.cn-hangzhou.aliyuncs.com");
+
+// 通过普通网关访问时，需要使用以用户UID开头的Endpoint
+//    在PAI-EAS控制台服务的调用信息中可以获得该信息
+client.setEndpoint("xxxxxxx.vpc.cn-hangzhou.pai-eas.aliyuncs.com");
+
+client.setModelName("ali_rec_rnk");
+// 设置服务Token信息
+client.setToken("atxjzk****");
+
+EasyRecRequest easyrecRequest = new EasyRecRequest(separator);
 easyrecRequest.appendUserFeatureString(userFeatures);
 easyrecRequest.appendContextFeatureString(contextFeatures);
 easyrecRequest.appendItemStr(itemIdStr, ",");
@@ -628,30 +564,56 @@ easyrecRequest.appendItemStr(itemIdStr, ",");
 PredictProtos.PBResponse response = client.predict(easyrecRequest);
 
 for (Map.Entry<String, PredictProtos.Results> entry : response.getResultsMap().entrySet()) {
-      String key = entry.getKey();
-      PredictProtos.Results value = entry.getValue();
-      System.out.print("key: " + key);
-      for (int i = 0; i < value.getScoresCount(); i++) {
-          System.out.format(" value: %.4f ", value.getScores(i));
-      }
+    String key = entry.getKey();
+    PredictProtos.Results value = entry.getValue();
+    System.out.print("key: " + key);
+    for (int i = 0; i < value.getScoresCount(); i++) {
+        System.out.format("value: %.6g\n", value.getScores(i));
+    }
 }
 ```
+
+- client.setDirectEndpoint: [网络直连](https://help.aliyun.com/zh/pai/user-guide/call-a-service-over-the-vpc-direct-connection-channel)可以减少网络传输时间, 显著提升性能
+
+  - 请从上述文档查看不同region对应的direct endpoint地址
+
+- EasyRecRequest类方法列表
+
+  <table class="docutils" border=1>
+    <tr><th>方法</th><th>描述</th></tr>
+    <tr><td>setSeparator(String sep)</td><td>设置user特征分隔符, 默认是"\u0002", 即CTRL_B</td></tr>
+    <tr><td>addUserFeature(String key, T value)</td><td>增加一个user特征, key是特征名, value是特征值, value支持的类型包括String, float, long, int</td></tr>
+    <tr><td>appendUserFeatureString</td><td>增加一组user特征,特征之间以separator分隔,特征内部使用":"分隔特征名和特征值</td></tr>
+    <tr><td>appendItemId(String itemId)</td><td>增加一个itemId</td></tr>
+    <tr><td>appendItemStr(String itemIdStr)</td><td>增加一组itemIds, 以","分隔</td></tr>
+    <tr><td>addContextFeature(String key, List<Object> contextFeatures)</td><td>增加一个context特征, key是特征名, contextFeatures是特征值的列表, 列表中的元素和itemId一一对应</td></tr>
+    <tr><td>addContextFeatureString(String contextStr)</td><td>增加一个context特征,特征名和特征值,特征值和特征值之间以":"分割,分割后的长度应该等于len(itemIds) + 1</td></tr>
+    <tr><td>getRequest()</td><td>返回build好的EasyRecPredictProtos.PBRequest</td></tr>
+  </table>
 
 - 验证特征一致性
 
-```
-...
+  ```java
+  // 获取FG之后的特征，以便和离线的特征对比一致性
+  // 将DebugLevel设置成1，即可返回生成的特征
+  easyrecRequest.setDebugLevel(1);
+  PredictProtos.PBResponse response = client.predict(easyrecRequest);
+  Map<String, String> genFeas = response.getGenerateFeaturesMap();
+  for(String itemId: genFeas.keySet()) {
+      System.out.println(itemId);
+      System.out.println(genFeas.get(itemId));
+  }
+  ```
 
-easyrecRequest.setDebug();
-PredictProtos.PBResponse response = client.predict(easyrecRequest);
-for (Map.Entry<String, PredictProtos.Results> entry :
-     response.getResultsMap().entrySet()) {
-   Map<String, String> itemFeas = response.getItemFeatures();
-   for(String itemId: itemFeas.keySet()) {
-     System.out.println(itemId);
-     System.out.println(itemFeas.get(itemId));
-   }
-}
-```
+- setDebugLevel: 设置调试标志, 方便排查问题, 参数的取值范围如下:
 
-- Note: 生产环境调用的时候不要设置debug，会导致rt升高，qps下降.
+  - 0: 仅返回预测结果, 不返回调试信息
+  - 1: 只返回FG之后特征的值, 格式为key:value格式, 不返回预测结果
+  - 2: 返回预测结果和FG之后的特征值
+  - 3: 返回FG之后特征值, 格式为表格格式, 特征之间用\\u0002分隔, 适用于ODL[实时样本](./odl_sample.md)构造的场景
+  - 4: 将FG之后生成的特征值直接写入datahub, 不通过rpc返回, 适用于ODL[实时样本](./odl_sample.md)构造的场景
+  - 100: 保存请求到模型目录下, 同时返回预测结果
+  - 101: 保存timeline
+  - 102: 适用于召回模型, 返回user向量和Faiss检索结果
+
+- 注意: 生产环境调用的时候设置debug_level=0，否则会导致rt上升, qps下降.

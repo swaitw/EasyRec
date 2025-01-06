@@ -4,6 +4,7 @@
 
 isort:skip_file
 """
+import logging
 from future import standard_library
 standard_library.install_aliases()
 
@@ -15,11 +16,14 @@ import six
 import tensorflow as tf
 from six.moves import http_client
 from six.moves import urllib
-
+import json
 if six.PY2:
   from urllib import quote
 else:
   from urllib.parse import quote
+
+if tf.__version__ >= '2.0':
+  tf = tf.compat.v1
 
 EASY_REC_RES_DIR = 'easy_rec_user_resources'
 HTTP_MAX_NUM_RETRY = 5
@@ -165,3 +169,114 @@ def fix_oss_dir(path):
   if path.startswith('oss://') and not path.endswith('/'):
     return path + '/'
   return path
+
+
+def save_data_to_json_path(json_path, data):
+  with tf.gfile.GFile(json_path, 'w') as fout:
+    fout.write(json.dumps(data))
+  assert tf.gfile.Exists(json_path), 'in_save_data_to_json_path, save_failed'
+
+
+def read_data_from_json_path(json_path):
+  if json_path and tf.gfile.Exists(json_path):
+    with tf.gfile.GFile(json_path, 'r') as fin:
+      data = json.loads(fin.read())
+    return data
+  else:
+    logging.info('json_path not exists, return None')
+    return None
+
+
+def convert_tf_flags_to_argparse(flags):
+  """Convert tf.app.flags.FLAGS to argparse.ArgumentParser.
+
+  Args:
+      flags: tf.app.flags.FLAGS
+  Returns:
+      argparse.ArgumentParser: configurate ArgumentParser object
+  """
+  import argparse
+  import ast
+  parser = argparse.ArgumentParser()
+
+  args = {}
+  for flag in flags._flags().values():
+    flag_name = flag.name
+    if flag_name in args:
+      args[flag_name][0] = True
+      continue
+    default = flag.value
+    flag_type = type(default)
+    help_str = flag.help or ''
+    args[flag_name] = [
+        False, flag_type, default, help_str,
+        flag.choices if hasattr(flag, 'choices') else None
+    ]
+
+  def str2bool(v):
+    if isinstance(v, bool):
+      return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+      return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+      return False
+    else:
+      raise argparse.ArgumentTypeError('Boolean value expected.')
+
+  for flag_name, (multi, flag_type, default, help_str, choices) in args.items():
+    if flag_type == bool:
+      parser.add_argument(
+          '--' + flag_name,
+          type=str2bool,
+          nargs='?',
+          const=True,
+          default=False,
+          help=help_str)
+    elif flag_type == str:
+      if choices:
+        parser.add_argument(
+            '--' + flag_name,
+            type=str,
+            choices=choices,
+            default=default,
+            help=help_str)
+      elif multi:
+        parser.add_argument(
+            '--' + flag_name,
+            type=str,
+            action='append',
+            default=default,
+            help=help_str)
+      else:
+        parser.add_argument(
+            '--' + flag_name, type=str, default=default, help=help_str)
+    elif flag_type in (list, dict):
+      parser.add_argument(
+          '--' + flag_name,
+          type=lambda s: ast.literal_eval(s),
+          default=default,
+          help=help_str)
+    elif flag_type in (int, float):
+      parser.add_argument(
+          '--' + flag_name, type=flag_type, default=default, help=help_str)
+    else:
+      parser.add_argument(
+          '--' + flag_name, type=str, default=default, help=help_str)
+  return parser
+
+
+def filter_unknown_args(flags, args):
+  """Filter unknown args."""
+  known_args = [args[0]]
+  parser = convert_tf_flags_to_argparse(flags)
+  args, unknown = parser.parse_known_args(args)
+  if len(unknown) > 1:
+    logging.info('undefined arguments: %s', ', '.join(unknown[1:]))
+  for key, value in vars(args).items():
+    if value is None:
+      continue
+    if type(value) in (list, dict) and not value:
+      continue
+    known_args.append('--' + key + '=' + str(value))
+  logging.info('defined arguments: %s', ', '.join(known_args[1:]))
+  return known_args

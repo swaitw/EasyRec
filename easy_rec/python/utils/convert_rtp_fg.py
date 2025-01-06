@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import traceback
 
 import tensorflow as tf
 from google.protobuf import text_format
@@ -16,6 +17,8 @@ from easy_rec.python.utils import config_util
 
 if tf.__version__ >= '2.0':
   tf = tf.compat.v1
+
+MAX_HASH_BUCKET_SIZE = 9223372036854775807
 
 
 def _gen_raw_config(feature, input_field, feature_config, is_multi,
@@ -32,7 +35,7 @@ def _gen_raw_config(feature, input_field, feature_config, is_multi,
     feature_config.embedding_dim = curr_embed_dim
   else:
     feature_config.feature_type = feature_config.RawFeature
-    input_field.default_val = feature.get('default_value', '0.0')
+    input_field.default_val = str(feature.get('default_value', '0.0'))
     raw_input_dim = feature.get('value_dimension', 1)
     if raw_input_dim > 1:
       feature_config.raw_input_dim = raw_input_dim
@@ -42,6 +45,8 @@ def _gen_raw_config(feature, input_field, feature_config, is_multi,
     if 'boundaries' in feature:
       feature_config.boundaries.extend(feature['boundaries'])
       feature_config.embedding_dim = curr_embed_dim
+  if 'normalizer_fn' in feature:
+    feature_config.normalizer_fn = feature['normalizer_fn']
 
 
 def _set_hash_bucket(feature, feature_config, input_field):
@@ -55,6 +60,12 @@ def _set_hash_bucket(feature, feature_config, input_field):
             'it is suggested to set max_partitions > 1 for large hash buckets[%s]'
             % feature['feature_name'])
         sys.exit(1)
+    if feature.get('filter_freq', -1) >= 0:
+      feature_config.ev_params.filter_freq = feature['filter_freq']
+      feature_config.hash_bucket_size = MAX_HASH_BUCKET_SIZE
+    if feature.get('steps_to_live', -1) >= 0:
+      feature_config.ev_params.steps_to_live = feature['steps_to_live']
+      feature_config.hash_bucket_size = MAX_HASH_BUCKET_SIZE
   elif 'vocab_file' in feature:
     feature_config.vocab_file = feature['vocab_file']
   elif 'vocab_list' in feature:
@@ -72,7 +83,6 @@ def process_features(feature_type,
                      pipeline_config,
                      embedding_dim,
                      incol_separator,
-                     sub_value_type=None,
                      is_sequence=False):
   feature_config = FeatureConfig()
   feature_config.input_names.append(feature_name)
@@ -81,13 +91,28 @@ def process_features(feature_type,
   input_field.input_name = feature_name
   curr_embed_dim = feature.get('embedding_dimension',
                                feature.get('embedding_dim', embedding_dim))
-  curr_combiner = feature.get('combiner', 'mean')
+  curr_combiner = feature.get('combiner', 'sum')
   if feature.get('is_cache', False):
     logging.info('will cache %s' % feature_name)
     feature_config.is_cache = True
   is_multi = feature.get('is_multi', False)
   # is_seq = feature.get('is_seq', False)
-  if feature_type == 'id_feature':
+  if is_sequence:
+    feature_config.feature_type = feature_config.SequenceFeature
+    feature_config.embedding_dim = curr_embed_dim
+    if feature_type == 'raw_feature':
+      feature_config.sub_feature_type = feature_config.RawFeature
+      input_field.default_val = feature.get('default_value', '0.0')
+      raw_input_dim = feature.get('value_dimension', 1)
+      if 'boundaries' in feature:
+        feature_config.boundaries.extend(feature['boundaries'])
+      if raw_input_dim > 1:
+        feature_config.raw_input_dim = raw_input_dim
+    else:
+      feature_config.sub_feature_type = feature_config.IdFeature
+      _set_hash_bucket(feature, feature_config, input_field)
+      feature_config.combiner = curr_combiner
+  elif feature_type == 'id_feature':
     if is_multi:
       feature_config.feature_type = feature_config.TagFeature
       kv_separator = feature.get('kv_separator', None)
@@ -106,12 +131,9 @@ def process_features(feature_type,
       _gen_raw_config(feature, input_field, feature_config, is_multi,
                       curr_embed_dim)
     else:
-      if is_multi:
-        feature_config.feature_type = feature_config.TagFeature
-        if feature_config.get('needWeighting', False):
-          feature_config.kv_separator = ''
-      else:
-        feature_config.feature_type = feature_config.IdFeature
+      feature_config.feature_type = feature_config.TagFeature
+      if feature.get('needWeighting', False):
+        feature_config.kv_separator = ''
       feature_config.embedding_dim = curr_embed_dim
       _set_hash_bucket(feature, feature_config, input_field)
       feature_config.combiner = curr_combiner
@@ -123,12 +145,9 @@ def process_features(feature_type,
     if feature.get('matchType', '') == 'multihit':
       is_multi = True
     if need_discrete:
-      if is_multi:
-        feature_config.feature_type = feature_config.TagFeature
-        if feature_config.get('needWeighting', False):
-          feature_config.kv_separator = ''
-      else:
-        feature_config.feature_type = feature_config.IdFeature
+      feature_config.feature_type = feature_config.TagFeature
+      if feature.get('needWeighting', False):
+        feature_config.kv_separator = ''
       feature_config.embedding_dim = curr_embed_dim
       _set_hash_bucket(feature, feature_config, input_field)
       feature_config.combiner = curr_combiner
@@ -154,8 +173,6 @@ def process_features(feature_type,
   if 'shared_name' in feature:
     feature_config.embedding_name = feature['shared_name']
   # pipeline_config.feature_configs.append(feature_config)
-  if is_sequence:
-    feature_config.feature_type = feature_config.SequenceFeature
   if pipeline_config.feature_configs:
     pipeline_config.feature_configs.append(feature_config)
   else:
@@ -229,9 +246,6 @@ def load_input_field_and_feature_config(rtp_fg,
         for sub_feature in feature['features']:
           sub_feature_type = sub_feature['feature_type']
           sub_feature_name = sub_feature['feature_name']
-          sub_value_type = None
-          if 'value_type' in sub_feature:
-            sub_value_type = sub_feature['value_type']
           all_sub_feature_name = sequence_name + '_' + sub_feature_name
           pipeline_config = process_features(
               sub_feature_type,
@@ -240,11 +254,10 @@ def load_input_field_and_feature_config(rtp_fg,
               pipeline_config,
               embedding_dim,
               incol_separator,
-              sub_value_type,
               is_sequence=True)
-    except Exception as ex:
-      print('Exception: %s %s' % (type(ex), str(ex)))
-      print(feature)
+    except Exception:
+      logging.info('convert feature[%s] exception[%s]' %
+                   (str(feature), traceback.format_exc()))
       sys.exit(1)
   return pipeline_config
 

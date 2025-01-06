@@ -2,25 +2,31 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 from __future__ import print_function
 
-import json
 import logging
 # use few threads to avoid oss error
 import os
+import time
 
 import tensorflow as tf
+import yaml
+from tensorflow.python.platform import gfile
 
 import easy_rec
-from easy_rec.python.inference.predictor import Predictor
+from easy_rec.python.inference.odps_predictor import ODPSPredictor
 from easy_rec.python.inference.vector_retrieve import VectorRetrieve
+from easy_rec.python.tools.pre_check import run_check
 from easy_rec.python.utils import config_util
+from easy_rec.python.utils import constant
+from easy_rec.python.utils import estimator_utils
 from easy_rec.python.utils import fg_util
 from easy_rec.python.utils import hpo_util
 from easy_rec.python.utils import pai_util
 from easy_rec.python.utils.distribution_utils import DistributionStrategyMap
 from easy_rec.python.utils.distribution_utils import set_distribution_config
 
-from easy_rec.python.utils.distribution_utils import set_tf_config_and_get_train_worker_num  # NOQA
+os.environ['IS_ON_PAI'] = '1'
 
+from easy_rec.python.utils.distribution_utils import set_tf_config_and_get_train_worker_num  # NOQA
 os.environ['OENV_MultiWriteThreadsNum'] = '4'
 os.environ['OENV_MultiCopyThreadsNum'] = '4'
 
@@ -64,6 +70,8 @@ tf.app.flags.DEFINE_string('train_tables', '', 'tables used for train')
 tf.app.flags.DEFINE_string('eval_tables', '', 'tables used for evaluation')
 tf.app.flags.DEFINE_string('boundary_table', '', 'tables used for boundary')
 tf.app.flags.DEFINE_string('sampler_table', '', 'tables used for sampler')
+tf.app.flags.DEFINE_string('fine_tune_checkpoint', None,
+                           'finetune checkpoint path')
 tf.app.flags.DEFINE_string('query_table', '',
                            'table used for retrieve vector neighbours')
 tf.app.flags.DEFINE_string('doc_table', '',
@@ -101,6 +109,11 @@ tf.app.flags.DEFINE_bool('distribute_eval', False,
 # flags used for export
 tf.app.flags.DEFINE_string('export_dir', '',
                            'directory where model should be exported to')
+tf.app.flags.DEFINE_bool('clear_export', False, 'remove export_dir if exists')
+tf.app.flags.DEFINE_string('export_done_file', '',
+                           'a flag file to signal that export model is done')
+tf.app.flags.DEFINE_integer('max_wait_ckpt_ts', 0,
+                            'max wait time in seconds for checkpoints')
 tf.app.flags.DEFINE_boolean('continue_train', True,
                             'use the same model to continue train or not')
 
@@ -155,14 +168,22 @@ tf.app.flags.DEFINE_integer('oss_write_kv', 1,
 tf.app.flags.DEFINE_string('oss_embedding_version', '', 'oss embedding version')
 
 tf.app.flags.DEFINE_bool('verbose', False, 'print more debug information')
+tf.app.flags.DEFINE_bool('place_embedding_on_cpu', False,
+                         'whether to place embedding variables on cpu')
 
 # for automl hyper parameter tuning
 tf.app.flags.DEFINE_string('model_dir', None, 'model directory')
+tf.app.flags.DEFINE_bool('clear_model', False,
+                         'remove model directory if exists')
 tf.app.flags.DEFINE_string('hpo_param_path', None,
                            'hyperparameter tuning param path')
 tf.app.flags.DEFINE_string('hpo_metric_save_path', None,
                            'hyperparameter save metric path')
 tf.app.flags.DEFINE_string('asset_files', None, 'extra files to add to export')
+tf.app.flags.DEFINE_bool('check_mode', False, 'is use check mode')
+tf.app.flags.DEFINE_string('fg_json_path', None, '')
+tf.app.flags.DEFINE_bool('enable_avx_str_split', False,
+                         'enable avx str split to speedup')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -193,8 +214,38 @@ def set_selected_cols(pipeline_config, selected_cols, all_cols, all_col_types):
         pipeline_config.data_config.selected_col_types)
 
 
+def _wait_ckpt(ckpt_path, max_wait_ts):
+  logging.info('will wait %s seconds for checkpoint' % max_wait_ts)
+  start_ts = time.time()
+  if '/model.ckpt-' not in ckpt_path:
+    while time.time() - start_ts < max_wait_ts:
+      tmp_ckpt = estimator_utils.latest_checkpoint(ckpt_path)
+      if tmp_ckpt is None:
+        logging.info('wait for checkpoint in directory[%s]' % ckpt_path)
+        time.sleep(30)
+      else:
+        logging.info('find checkpoint[%s] in directory[%s]' %
+                     (tmp_ckpt, ckpt_path))
+        break
+  else:
+    while time.time() - start_ts < max_wait_ts:
+      if not gfile.Exists(ckpt_path + '.index'):
+        logging.info('wait for checkpoint[%s]' % ckpt_path)
+        time.sleep(30)
+      else:
+        logging.info('find checkpoint[%s]' % ckpt_path)
+        break
+
+
 def main(argv):
   pai_util.set_on_pai()
+  if FLAGS.enable_avx_str_split:
+    constant.enable_avx_str_split()
+    logging.info('will enable avx str split: %s' %
+                 constant.is_avx_str_split_enabled())
+
+  if FLAGS.distribute_eval:
+    os.environ['distribute_eval'] = 'True'
 
   # load lookup op
   try:
@@ -215,9 +266,14 @@ def main(argv):
                                      len(FLAGS.worker_hosts.split(',')))
     pipeline_config = config_util.get_configs_from_pipeline_file(config, False)
 
+    # should be in front of edit_config_json step
+    # otherwise data_config and feature_config are not ready
+    if pipeline_config.fg_json_path:
+      fg_util.load_fg_json_to_config(pipeline_config)
+
   if FLAGS.edit_config_json:
     print('[run.py] edit_config_json = %s' % FLAGS.edit_config_json)
-    config_json = json.loads(FLAGS.edit_config_json)
+    config_json = yaml.safe_load(FLAGS.edit_config_json)
     config_util.edit_config(pipeline_config, config_json)
 
   if FLAGS.model_dir:
@@ -227,10 +283,29 @@ def main(argv):
     assert pipeline_config.model_dir.startswith(
         'oss://'), 'invalid model_dir format: %s' % pipeline_config.model_dir
 
+  if FLAGS.asset_files:
+    pipeline_config.export_config.asset_files.extend(
+        FLAGS.asset_files.split(','))
+
+  if FLAGS.config:
+    if not pipeline_config.model_dir.endswith('/'):
+      pipeline_config.model_dir += '/'
+
+  if FLAGS.clear_model:
+    if gfile.IsDirectory(
+        pipeline_config.model_dir) and estimator_utils.is_chief():
+      gfile.DeleteRecursively(pipeline_config.model_dir)
+
+  if FLAGS.max_wait_ckpt_ts > 0:
+    if FLAGS.checkpoint_path:
+      _wait_ckpt(FLAGS.checkpoint_path, FLAGS.max_wait_ckpt_ts)
+    else:
+      _wait_ckpt(pipeline_config.model_dir, FLAGS.max_wait_ckpt_ts)
+
   if FLAGS.cmd == 'train':
     assert FLAGS.config, 'config should not be empty when training!'
 
-    if not FLAGS.train_tables:
+    if not FLAGS.train_tables and FLAGS.tables:
       tables = FLAGS.tables.split(',')
       assert len(
           tables
@@ -239,19 +314,23 @@ def main(argv):
 
     if FLAGS.train_tables:
       pipeline_config.train_input_path = FLAGS.train_tables
-    else:
+    elif FLAGS.tables:
       pipeline_config.train_input_path = FLAGS.tables.split(',')[0]
 
     if FLAGS.eval_tables:
       pipeline_config.eval_input_path = FLAGS.eval_tables
-    else:
+    elif FLAGS.tables:
       pipeline_config.eval_input_path = FLAGS.tables.split(',')[1]
 
     print('[run.py] train_tables: %s' % pipeline_config.train_input_path)
     print('[run.py] eval_tables: %s' % pipeline_config.eval_input_path)
 
-    if pipeline_config.fg_json_path:
-      fg_util.load_fg_json_to_config(pipeline_config)
+    if FLAGS.fine_tune_checkpoint:
+      pipeline_config.train_config.fine_tune_checkpoint = FLAGS.fine_tune_checkpoint
+
+    if pipeline_config.train_config.HasField('fine_tune_checkpoint'):
+      pipeline_config.train_config.fine_tune_checkpoint = estimator_utils.get_latest_checkpoint_from_checkpoint_path(
+          pipeline_config.train_config.fine_tune_checkpoint, False)
 
     if FLAGS.boundary_table:
       logging.info('Load boundary_table: %s' % FLAGS.boundary_table)
@@ -261,17 +340,21 @@ def main(argv):
     if FLAGS.sampler_table:
       pipeline_config.data_config.negative_sampler.input_path = FLAGS.sampler_table
 
-    # parse selected_cols
-    set_selected_cols(pipeline_config, FLAGS.selected_cols, FLAGS.all_cols,
-                      FLAGS.all_col_types)
+    if FLAGS.train_tables or FLAGS.tables:
+      # parse selected_cols
+      set_selected_cols(pipeline_config, FLAGS.selected_cols, FLAGS.all_cols,
+                        FLAGS.all_col_types)
+    else:
+      pipeline_config.data_config.selected_cols = ''
+      pipeline_config.data_config.selected_col_types = ''
 
     distribute_strategy = DistributionStrategyMap[FLAGS.distribute_strategy]
 
     # update params specified by automl if hpo_param_path is specified
     if FLAGS.hpo_param_path:
       logging.info('hpo_param_path = %s' % FLAGS.hpo_param_path)
-      with tf.gfile.GFile(FLAGS.hpo_param_path, 'r') as fin:
-        hpo_config = json.load(fin)
+      with gfile.GFile(FLAGS.hpo_param_path, 'r') as fin:
+        hpo_config = yaml.safe_load(fin)
         hpo_params = hpo_config['param']
         config_util.edit_config(pipeline_config, hpo_params)
     config_util.auto_expand_share_feature_configs(pipeline_config)
@@ -281,8 +364,11 @@ def main(argv):
     assert FLAGS.eval_method in [
         'none', 'master', 'separate'
     ], 'invalid evalaute_method: %s' % FLAGS.eval_method
+
+    # with_evaluator is depreciated, keeped for compatibility
     if FLAGS.with_evaluator:
       FLAGS.eval_method = 'separate'
+
     num_worker = set_tf_config_and_get_train_worker_num(
         FLAGS.ps_hosts,
         FLAGS.worker_hosts,
@@ -292,25 +378,29 @@ def main(argv):
         eval_method=FLAGS.eval_method)
     set_distribution_config(pipeline_config, num_worker, num_gpus_per_worker,
                             distribute_strategy)
+    logging.info('run.py check_mode: %s .' % FLAGS.check_mode)
     train_and_evaluate_impl(
-        pipeline_config, continue_train=FLAGS.continue_train)
+        pipeline_config,
+        continue_train=FLAGS.continue_train,
+        check_mode=FLAGS.check_mode)
 
     if FLAGS.hpo_metric_save_path:
       hpo_util.save_eval_metrics(
           pipeline_config.model_dir,
           metric_save_path=FLAGS.hpo_metric_save_path,
-          has_evaluator=FLAGS.with_evaluator)
+          has_evaluator=(FLAGS.eval_method == 'separate'))
+
   elif FLAGS.cmd == 'evaluate':
     check_param('config')
     # TODO: support multi-worker evaluation
     if not FLAGS.distribute_eval:
       assert len(
-          FLAGS.worker_hosts.split(',')) == 1, 'evaluate only need 1 woker'
+          FLAGS.worker_hosts.split(',')) == 1, 'evaluate only need 1 worker'
     config_util.auto_expand_share_feature_configs(pipeline_config)
 
     if FLAGS.eval_tables:
       pipeline_config.eval_input_path = FLAGS.eval_tables
-    else:
+    elif FLAGS.tables:
       pipeline_config.eval_input_path = FLAGS.tables.split(',')[0]
 
     distribute_strategy = DistributionStrategyMap[FLAGS.distribute_strategy]
@@ -323,19 +413,35 @@ def main(argv):
     set_distribution_config(pipeline_config, num_worker, num_gpus_per_worker,
                             distribute_strategy)
 
-    # parse selected_cols
-    set_selected_cols(pipeline_config, FLAGS.selected_cols, FLAGS.all_cols,
-                      FLAGS.all_col_types)
+    if FLAGS.eval_tables or FLAGS.tables:
+      # parse selected_cols
+      set_selected_cols(pipeline_config, FLAGS.selected_cols, FLAGS.all_cols,
+                        FLAGS.all_col_types)
+    else:
+      pipeline_config.data_config.selected_cols = ''
+      pipeline_config.data_config.selected_col_types = ''
+
     if FLAGS.distribute_eval:
+      os.environ['distribute_eval'] = 'True'
+      logging.info('will_use_distribute_eval')
+      distribute_eval = os.environ.get('distribute_eval')
+      logging.info('distribute_eval = {}'.format(distribute_eval))
       easy_rec.distribute_evaluate(pipeline_config, FLAGS.checkpoint_path, None,
                                    FLAGS.eval_result_path)
     else:
+      os.environ['distribute_eval'] = 'False'
+      logging.info('will_use_eval')
+      distribute_eval = os.environ.get('distribute_eval')
+      logging.info('distribute_eval = {}'.format(distribute_eval))
       easy_rec.evaluate(pipeline_config, FLAGS.checkpoint_path, None,
                         FLAGS.eval_result_path)
   elif FLAGS.cmd == 'export':
     check_param('export_dir')
     check_param('config')
-
+    if FLAGS.place_embedding_on_cpu:
+      os.environ['place_embedding_on_cpu'] = 'True'
+    else:
+      os.environ['place_embedding_on_cpu'] = 'False'
     redis_params = {}
     if FLAGS.redis_url:
       redis_params['redis_url'] = FLAGS.redis_url
@@ -382,10 +488,23 @@ def main(argv):
     assert len(FLAGS.worker_hosts.split(',')) == 1, 'export only need 1 woker'
     config_util.auto_expand_share_feature_configs(pipeline_config)
 
+    export_dir = FLAGS.export_dir
+    if not export_dir.endswith('/'):
+      export_dir = export_dir + '/'
+    if FLAGS.clear_export:
+      if gfile.IsDirectory(export_dir):
+        gfile.DeleteRecursively(export_dir)
+
     extra_params = redis_params
     extra_params.update(oss_params)
-    easy_rec.export(FLAGS.export_dir, pipeline_config, FLAGS.checkpoint_path,
-                    FLAGS.asset_files, FLAGS.verbose, **extra_params)
+    export_out_dir = easy_rec.export(export_dir, pipeline_config,
+                                     FLAGS.checkpoint_path, FLAGS.asset_files,
+                                     FLAGS.verbose, **extra_params)
+    if FLAGS.export_done_file:
+      flag_file = os.path.join(export_out_dir, FLAGS.export_done_file)
+      logging.info('create export done file: %s' % flag_file)
+      with gfile.GFile(flag_file, 'w') as fout:
+        fout.write('ExportDone')
   elif FLAGS.cmd == 'predict':
     check_param('tables')
     check_param('saved_model_dir')
@@ -397,7 +516,12 @@ def main(argv):
     profiling_file = FLAGS.profiling_file if FLAGS.task_index == 0 else None
     if profiling_file is not None:
       print('profiling_file = %s ' % profiling_file)
-    predictor = Predictor(FLAGS.saved_model_dir, profiling_file=profiling_file)
+    predictor = ODPSPredictor(
+        FLAGS.saved_model_dir,
+        fg_json_path=FLAGS.fg_json_path,
+        profiling_file=profiling_file,
+        all_cols=FLAGS.all_cols,
+        all_col_types=FLAGS.all_col_types)
     input_table, output_table = FLAGS.tables, FLAGS.outputs
     logging.info('input_table = %s, output_table = %s' %
                  (input_table, output_table))
@@ -405,14 +529,28 @@ def main(argv):
     predictor.predict_impl(
         input_table,
         output_table,
-        all_cols=FLAGS.all_cols,
-        all_col_types=FLAGS.all_col_types,
-        selected_cols=FLAGS.selected_cols,
         reserved_cols=FLAGS.reserved_cols,
         output_cols=FLAGS.output_cols,
         batch_size=FLAGS.batch_size,
         slice_id=FLAGS.task_index,
         slice_num=worker_num)
+  elif FLAGS.cmd == 'export_checkpoint':
+    check_param('export_dir')
+    check_param('config')
+    set_tf_config_and_get_train_worker_num(
+        FLAGS.ps_hosts,
+        FLAGS.worker_hosts,
+        FLAGS.task_index,
+        FLAGS.job_name,
+        eval_method='none')
+    assert len(FLAGS.worker_hosts.split(',')) == 1, 'export only need 1 woker'
+    config_util.auto_expand_share_feature_configs(pipeline_config)
+    easy_rec.export_checkpoint(
+        pipeline_config,
+        export_path=FLAGS.export_dir + '/model',
+        checkpoint_path=FLAGS.checkpoint_path,
+        asset_files=FLAGS.asset_files,
+        verbose=FLAGS.verbose)
   elif FLAGS.cmd == 'vector_retrieve':
     check_param('knn_distance')
     assert FLAGS.knn_feature_dims is not None, '`knn_feature_dims` should not be None'
@@ -442,9 +580,12 @@ def main(argv):
         m=FLAGS.knn_compress_dim)
     worker_hosts = FLAGS.worker_hosts.split(',')
     knn(FLAGS.knn_num_neighbours, FLAGS.task_index, len(worker_hosts))
+  elif FLAGS.cmd == 'check':
+    run_check(pipeline_config, FLAGS.tables)
   else:
     raise ValueError(
-        'cmd should be one of train/evaluate/export/predict/vector_retrieve')
+        'cmd should be one of train/evaluate/export/predict/export_checkpoint/vector_retrieve'
+    )
 
 
 if __name__ == '__main__':

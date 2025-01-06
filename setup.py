@@ -52,11 +52,11 @@ def parse_requirements(fname='requirements.txt'):
 setup(
     name='easy-rec',
     version=get_version(),
-    description='An framework for deep learning on recommendation',
+    description='An easy-to-use framework for Recommendation',
     doc=readme(),
     author='EasyRec Team',
     author_email='easy_rec@alibaba-inc.com',
-    url='http://gitlab.alibaba-inc.com/pai_biz_arch/EasyRec',
+    url='https://github.com/alibaba/EasyRec',
     packages=find_packages(),
     include_package_data=True,
     classifiers=[

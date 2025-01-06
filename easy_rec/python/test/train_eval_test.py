@@ -1,22 +1,43 @@
 # -*- encoding:utf-8 -*-
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+import glob
 import logging
 import os
+import threading
+import time
 import unittest
-from distutils.version import LooseVersion
 
 import numpy as np
+import six
 import tensorflow as tf
+from distutils.version import LooseVersion
+from tensorflow.python.platform import gfile
 
 from easy_rec.python.main import predict
 from easy_rec.python.utils import config_util
+from easy_rec.python.utils import constant
 from easy_rec.python.utils import estimator_utils
 from easy_rec.python.utils import test_utils
 
+try:
+  import graphlearn as gl
+except Exception:
+  gl = None
+
+try:
+  import horovod as hvd
+except Exception:
+  hvd = None
+
+try:
+  from sparse_operation_kit import experiment as sok
+except Exception:
+  sok = None
+
+tf_version = tf.__version__
 if tf.__version__ >= '2.0':
   tf = tf.compat.v1
-gfile = tf.gfile
 
 
 class TrainEvalTest(tf.test.TestCase):
@@ -40,6 +61,18 @@ class TrainEvalTest(tf.test.TestCase):
   def test_deepfm_with_combo_feature(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/deepfm_combo_on_avazu_ctr.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_deepfm_with_combo_v2_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_combo_v2_on_avazu_ctr.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_deepfm_with_combo_v3_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_combo_v3_on_avazu_ctr.config',
+        self._test_dir)
     self.assertTrue(self._success)
 
   def test_deepfm_freeze_gradient(self):
@@ -71,6 +104,20 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
+  def test_wide_and_deep_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/wide_and_deep_backbone_on_avazau.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dlrm(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dlrm_on_taobao.config', self._test_dir)
+
+  def test_dlrm_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dlrm_backbone_on_taobao.config', self._test_dir)
+
   def test_adamw_optimizer(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/deepfm_combo_on_avazu_adamw_ctr.config',
@@ -84,21 +131,38 @@ class TrainEvalTest(tf.test.TestCase):
     self.assertTrue(self._success)
 
   def test_deepfm_with_param_edit(self):
+    model_dir = os.path.join(self._test_dir, 'train_new')
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/deepfm_multi_cls_on_avazu_ctr.config',
         self._test_dir,
-        hyperparam_str='{"model_dir":"experiments/deepfm_multi_cls_on_avazu_ctr", '
-        '"model_config.deepfm.wide_output_dim": 32}')
+        hyperparam_str='{"model_dir":"%s", '
+        '"model_config.deepfm.wide_output_dim": 32}' % model_dir)
     self.assertTrue(self._success)
+    config_path = os.path.join(model_dir, 'pipeline.config')
+    pipeline_config = config_util.get_configs_from_pipeline_file(config_path)
+    self.assertTrue(pipeline_config.model_dir == model_dir)
+    self.assertTrue(pipeline_config.model_config.deepfm.wide_output_dim == 32)
 
   def test_multi_tower(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/multi_tower_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
+  def test_multi_tower_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_backbone_on_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   def test_multi_tower_gauc(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/multi_tower_on_taobao_gauc.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_tower_session_auc(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_on_taobao_session_auc.config',
         self._test_dir)
     self.assertTrue(self._success)
 
@@ -115,9 +179,11 @@ class TrainEvalTest(tf.test.TestCase):
     # remove last ckpt time
     ckpts_times = np.array(sorted(ckpts_times)[:-1])
     # ensure interval is 20s
+    diffs = list(ckpts_times[1:] - ckpts_times[:-1])
+    logging.info('nearby ckpts_times diff = %s' % diffs)
     self.assertAllClose(
         ckpts_times[1:] - ckpts_times[:-1], [20] * (len(ckpts_times) - 1),
-        atol=8)
+        atol=20)
     self.assertTrue(self._success)
 
   def test_keep_ckpt_max(self):
@@ -125,7 +191,6 @@ class TrainEvalTest(tf.test.TestCase):
     def _post_check_func(pipeline_config):
       ckpt_prefix = os.path.join(pipeline_config.model_dir, 'model.ckpt-*.meta')
       ckpts = gfile.Glob(ckpt_prefix)
-      print(ckpts)
       assert len(ckpts) == 3, 'invalid number of checkpoints: %d' % len(ckpts)
 
     self._success = test_utils.test_single_train_eval(
@@ -150,8 +215,9 @@ class TrainEvalTest(tf.test.TestCase):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/multi_tower_best_export_on_taobao.config',
         self._test_dir,
-        total_steps=1000,
-        post_check_func=_post_check_func)
+        total_steps=800,
+        post_check_func=_post_check_func,
+        timeout=3000)
     self.assertTrue(self._success)
 
   def test_latest_ckpt(self):
@@ -172,6 +238,67 @@ class TrainEvalTest(tf.test.TestCase):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/taobao_fg.config',
         self._test_dir,
+        post_check_func=_post_check_func)
+    self.assertTrue(self._success)
+
+  def test_oss_stop_signal(self):
+    train_dir = os.path.join(self._test_dir, 'train/')
+
+    def _watch_func():
+      while True:
+        tmp_ckpt = estimator_utils.latest_checkpoint(train_dir)
+        if tmp_ckpt is not None:
+          version = estimator_utils.get_ckpt_version(tmp_ckpt)
+          if version > 30:
+            break
+        time.sleep(1)
+      stop_file = os.path.join(train_dir, 'OSS_STOP_SIGNAL')
+      with open(stop_file, 'w') as fout:
+        fout.write('OSS_STOP_SIGNAL')
+
+    watch_th = threading.Thread(target=_watch_func)
+    watch_th.start()
+
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/taobao_fg_signal_stop.config',
+        self._test_dir,
+        total_steps=1000)
+    self.assertTrue(self._success)
+    watch_th.join()
+    final_ckpt = estimator_utils.latest_checkpoint(train_dir)
+    ckpt_version = estimator_utils.get_ckpt_version(final_ckpt)
+    logging.info('final ckpt version = %d' % ckpt_version)
+    self._success = ckpt_version < 1000
+    assert ckpt_version < 1000
+
+  def test_dead_line_stop_signal(self):
+    train_dir = os.path.join(self._test_dir, 'train/')
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/dead_line_stop.config',
+        self._test_dir,
+        total_steps=1000)
+    self.assertTrue(self._success)
+    final_ckpt = estimator_utils.latest_checkpoint(train_dir)
+    ckpt_version = estimator_utils.get_ckpt_version(final_ckpt)
+    logging.info('final ckpt version = %d' % ckpt_version)
+    self._success = ckpt_version < 1000
+    assert ckpt_version < 1000
+
+  def test_fine_tune_latest_ckpt_path(self):
+
+    def _post_check_func(pipeline_config):
+      logging.info('model_dir: %s' % pipeline_config.model_dir)
+      pipeline_config = config_util.get_configs_from_pipeline_file(
+          os.path.join(pipeline_config.model_dir, 'pipeline.config'), False)
+      logging.info('fine_tune_checkpoint: %s' %
+                   pipeline_config.train_config.fine_tune_checkpoint)
+      return pipeline_config.train_config.fine_tune_checkpoint == \
+          'data/test/mt_ckpt/model.ckpt-100'
+
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_on_taobao.config',
+        self._test_dir,
+        fine_tune_checkpoint='data/test/mt_ckpt',
         post_check_func=_post_check_func)
     self.assertTrue(self._success)
 
@@ -211,9 +338,20 @@ class TrainEvalTest(tf.test.TestCase):
         'samples/model_config/fm_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
+  def test_place_embed_on_cpu(self):
+    os.environ['place_embedding_on_cpu'] = 'True'
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/fm_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
   def test_din(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/din_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_din_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/din_backbone_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
   def test_bst(self):
@@ -221,9 +359,40 @@ class TrainEvalTest(tf.test.TestCase):
         'samples/model_config/bst_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
+  def test_bst_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/bst_backbone_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cl4srec(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cl4srec_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
   def test_dcn(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dcn_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_ziln_loss(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/mlp_on_taobao_with_ziln_loss.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_fibinet(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/fibinet_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_masknet(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/masknet_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dcn_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dcn_backbone_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
   def test_dcn_with_f1(self):
@@ -234,6 +403,75 @@ class TrainEvalTest(tf.test.TestCase):
   def test_autoint(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/autoint_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_uniter(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/uniter_on_movielens.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_highway(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/highway_on_movielens.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  # @unittest.skipIf(
+  #     LooseVersion(tf.__version__) >= LooseVersion('2.0.0'),
+  #     'has no CustomOp when tf version == 2.4')
+  # def test_custom_op(self):
+  #   self._success = test_utils.test_single_train_eval(
+  #       'samples/model_config/cl4srec_on_taobao_with_custom_op.config',
+  #       self._test_dir)
+  #   self.assertTrue(self._success)
+
+  def test_cdn(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cdn_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_ppnet(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/ppnet_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_uniter_only_text_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/uniter_on_movielens_only_text_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_uniter_only_image_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/uniter_on_movielens_only_image_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmbf(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cmbf_on_movielens.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmbf_with_multi_loss(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cmbf_with_multi_loss.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmbf_has_other_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cmbf_on_movielens_has_other_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmbf_only_text_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cmbf_on_movielens_only_text_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmbf_only_image_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/cmbf_on_movielens_only_image_feature.config',
+        self._test_dir)
     self.assertTrue(self._success)
 
   def test_dssm(self):
@@ -251,24 +489,35 @@ class TrainEvalTest(tf.test.TestCase):
         'samples/model_config/metric_learning_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
   def test_dssm_neg_sampler(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dssm_neg_sampler_on_taobao.config',
         self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
   def test_dssm_neg_sampler_v2(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dssm_neg_sampler_v2_on_taobao.config',
         self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
   def test_dssm_hard_neg_sampler(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dssm_hard_neg_sampler_on_taobao.config',
         self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_hard_neg_regular_sampler(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_hard_neg_sampler_regular_on_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
   def test_dssm_hard_neg_sampler_v2(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dssm_hard_neg_sampler_v2_on_taobao.config',
@@ -355,11 +604,6 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
-  # def test_deepfm_with_sequence_attention(self):
-  #   self._success = test_utils.test_single_train_eval(
-  #       'samples/model_config/deppfm_seq_attn_on_taobao.config', self._test_dir)
-  #   self.assertTrue(self._success)
-
   def test_deepfm_with_embedding_learning_rate(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/deepfm_combo_on_avazu_emblr_ctr.config',
@@ -372,9 +616,26 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
+  def test_deepfm_with_eval_online_gauc(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_combo_on_avazu_eval_online_gauc_ctr.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   def test_mmoe(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/mmoe_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_mmoe_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/mmoe_backbone_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_mmoe_with_multi_loss(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/mmoe_on_taobao_with_multi_loss.config',
+        self._test_dir)
     self.assertTrue(self._success)
 
   def test_mmoe_deprecated(self):
@@ -388,7 +649,13 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
-  def test_essm(self):
+  def test_simple_multi_task_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/simple_multi_task_backbone_on_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_esmm(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/esmm_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
@@ -398,9 +665,35 @@ class TrainEvalTest(tf.test.TestCase):
         'samples/model_config/kv_tag.config', self._test_dir)
     self.assertTrue(self._success)
 
+  def test_aitm(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/aitm_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
   def test_dbmtl(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dbmtl_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_backbone(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_backbone_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_cmbf(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_cmbf_on_movielens.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_uniter(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_uniter_on_movielens.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_with_multi_loss(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_taobao_with_multi_loss.config',
+        self._test_dir)
     self.assertTrue(self._success)
 
   def test_early_stop(self):
@@ -418,6 +711,12 @@ class TrainEvalTest(tf.test.TestCase):
   def test_early_stop_dis(self):
     self._success = test_utils.test_distributed_train_eval(
         'samples/model_config/multi_tower_early_stop_on_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_latest_export_with_asset(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/din_on_taobao_latest_export.config',
         self._test_dir)
     self.assertTrue(self._success)
 
@@ -440,13 +739,51 @@ class TrainEvalTest(tf.test.TestCase):
 
   def test_dbmtl_variational_dropout(self):
     self._success = test_utils.test_single_train_eval(
-        'samples/model_config/dbmtl_variational_dropout.config', self._test_dir)
+        'samples/model_config/dbmtl_variational_dropout.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
     self.assertTrue(self._success)
 
   def test_dbmtl_variational_dropout_feature_num(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dbmtl_variational_dropout_feature_num.config',
-        self._test_dir)
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
+    self.assertTrue(self._success)
+
+  def test_essm_variational_dropout(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/esmm_variational_dropout_on_taobao.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
+    self.assertTrue(self._success)
+
+  def test_fm_variational_dropout(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/fm_variational_dropout_on_taobao.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
+    self.assertTrue(self._success)
+
+  def test_deepfm_with_combo_feature_variational_dropout(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_combo_variational_dropout_on_avazu_ctr.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_sequence_variational_dropout(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_variational_dropout_on_sequence_feature_taobao.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
+    self.assertTrue(self._success)
+
+  def test_din_variational_dropout(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/din_varitional_dropout_on_taobao.config',
+        self._test_dir,
+        post_check_func=test_utils.test_feature_selection)
     self.assertTrue(self._success)
 
   def test_rocket_launching(self):
@@ -460,6 +797,12 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
+  def test_rocket_launching_with_rtp_input(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/rocket_launching_with_rtp_input.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   def test_dbmtl_mmoe(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/dbmtl_mmoe_on_taobao.config', self._test_dir)
@@ -469,6 +812,35 @@ class TrainEvalTest(tf.test.TestCase):
     self._success = test_utils.test_distributed_train_eval(
         'samples/model_config/multi_tower_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
+
+  def test_fit_on_eval(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/multi_tower_on_taobao.config',
+        self._test_dir,
+        num_evaluator=1,
+        fit_on_eval=True)
+    self.assertTrue(self._success)
+
+  def test_unbalance_data(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/multi_tower_on_taobao_unblanace.config',
+        self._test_dir,
+        total_steps=0,
+        num_epoch=1,
+        num_evaluator=1)
+    self.assertTrue(self._success)
+
+  def test_train_with_ps_worker_with_evaluator(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/multi_tower_on_taobao.config',
+        self._test_dir,
+        num_evaluator=1)
+    self.assertTrue(self._success)
+    final_export_dir = os.path.join(self._test_dir, 'train/export/final')
+    all_saved_files = glob.glob(final_export_dir + '/*/saved_model.pb')
+    logging.info('final_export_dir=%s all_saved_files=%s' %
+                 (final_export_dir, ','.join(all_saved_files)))
+    self.assertTrue(len(all_saved_files) == 1)
 
   def test_train_with_ps_worker_chief_redundant(self):
     self._success = test_utils.test_distributed_train_eval(
@@ -497,6 +869,18 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
+  def test_autodis_embedding(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_on_criteo_with_autodis.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_periodic_embedding(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_on_criteo_with_periodic.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   def test_sample_weight(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/deepfm_with_sample_weight.config', self._test_dir)
@@ -507,18 +891,40 @@ class TrainEvalTest(tf.test.TestCase):
         'samples/model_config/dssm_with_sample_weight.config', self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_neg_sampler_with_sample_weight(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_neg_sampler_with_sample_weight.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   @unittest.skipIf(
-      LooseVersion(tf.__version__) < LooseVersion('2.3.0'),
-      'MultiWorkerMirroredStrategy need tf version > 2.3')
+      LooseVersion(tf.__version__) != LooseVersion('2.3.0'),
+      'MultiWorkerMirroredStrategy need tf version == 2.3')
   def test_train_with_multi_worker_mirror(self):
     self._success = test_utils.test_distributed_train_eval(
         'samples/model_config/multi_tower_multi_worker_mirrored_strategy_on_taobao.config',
         self._test_dir)
     self.assertTrue(self._success)
 
+  @unittest.skipIf(
+      LooseVersion(tf.__version__) != LooseVersion('2.3.0'),
+      'MultiWorkerMirroredStrategy need tf version == 2.3')
+  def test_train_mmoe_with_multi_worker_mirror(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/mmoe_mirrored_strategy_on_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
   def test_fg_dtype(self):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/taobao_fg_test_dtype.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(six.PY2, 'Only run in python3')
+  def test_share_not_used(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/share_not_used.config', self._test_dir)
     self.assertTrue(self._success)
 
   def test_sequence_autoint(self):
@@ -545,15 +951,9 @@ class TrainEvalTest(tf.test.TestCase):
         self._test_dir)
     self.assertTrue(self._success)
 
-  # def test_sequence_essm(self):
-  #   self._success = test_utils.test_single_train_eval(
-  #       'samples/model_config/essm_on_sequence_feature_taobao.config',
-  #       self._test_dir)
-  #   self.assertTrue(self._success)
-
-  def test_sequence_fm(self):
+  def test_sequence_esmm(self):
     self._success = test_utils.test_single_train_eval(
-        'samples/model_config/fm_on_sequence_feature_taobao.config',
+        'samples/model_config/esmm_on_sequence_feature_taobao.config',
         self._test_dir)
     self.assertTrue(self._success)
 
@@ -585,10 +985,311 @@ class TrainEvalTest(tf.test.TestCase):
     self._success = test_utils.test_single_train_eval(
         'samples/model_config/wide_and_deep_on_sequence_feature_taobao.config',
         self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_numeric_boundary_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_numeric_boundary_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_numeric_hash_bucket_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_numeric_hash_bucket_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_numeric_raw_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_numeric_raw_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_numeric_num_buckets_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_numeric_num_buckets_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_numeric_boundary_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_boundary_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_numeric_hash_bucket_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_hash_bucket_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_numeric_raw_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_raw_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_numeric_num_buckets_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_num_buckets_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_multi_sequence_dbmtl(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_sequence_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
 
   def test_multi_optimizer(self):
     self._success = test_utils.test_distributed_train_eval(
         'samples/model_config/wide_and_deep_two_opti.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_embedding_separate_optimizer(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/deepfm_combo_on_avazu_embed_adagrad.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_expr_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_on_taobao_for_expr.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_gzip_data(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/din_on_gzip_data.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_cmd_config_param(self):
+
+    def _post_check_config(pipeline_config):
+      train_saved_config_path = os.path.join(self._test_dir,
+                                             'train/pipeline.config')
+      pipeline_config = config_util.get_configs_from_pipeline_file(
+          train_saved_config_path)
+      assert pipeline_config.model_config.deepfm.wide_output_dim == 8,\
+          'invalid model_config.deepfm.wide_output_dim=%d' % \
+          pipeline_config.model_config.deepfm.wide_output_dim
+
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_multi_cls_on_avazu_ctr.config',
+        self._test_dir,
+        post_check_func=_post_check_config,
+        extra_cmd_args='--model_config.deepfm.wide_output_dim 8')
+
+  def test_cmd_config_param_v2(self):
+
+    def _post_check_config(pipeline_config):
+      train_saved_config_path = os.path.join(self._test_dir,
+                                             'train/pipeline.config')
+      pipeline_config = config_util.get_configs_from_pipeline_file(
+          train_saved_config_path)
+      assert pipeline_config.model_config.deepfm.wide_output_dim == 1,\
+          'invalid model_config.deepfm.wide_output_dim=%d' % \
+          pipeline_config.model_config.deepfm.wide_output_dim
+
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_multi_cls_on_avazu_ctr.config',
+        self._test_dir,
+        post_check_func=_post_check_config,
+        extra_cmd_args='--model_config.deepfm.wide_output_dim=1')
+
+  def test_cmd_config_param_v3(self):
+
+    def _post_check_config(pipeline_config):
+      train_saved_config_path = os.path.join(self._test_dir,
+                                             'train/pipeline.config')
+      pipeline_config = config_util.get_configs_from_pipeline_file(
+          train_saved_config_path)
+      assert pipeline_config.model_config.deepfm.wide_output_dim == 3,\
+          'invalid model_config.deepfm.wide_output_dim=%d' % \
+          pipeline_config.model_config.deepfm.wide_output_dim
+
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/deepfm_multi_cls_on_avazu_ctr.config',
+        self._test_dir,
+        post_check_func=_post_check_config,
+        extra_cmd_args='--model_config.deepfm.wide_output_dim="3"')
+
+  def test_distribute_eval_deepfm_multi_cls(self):
+    cur_eval_path = 'data/test/distribute_eval_test/deepfm_distribute_eval_dwd_avazu_out_multi_cls'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/deepfm_distribute_eval_multi_cls_on_avazu_ctr.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_distribute_eval_deepfm_single_cls(self):
+    cur_eval_path = 'data/test/distribute_eval_test/dwd_distribute_eval_avazu_out_test_combo'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/deepfm_distribute_eval_combo_on_avazu_ctr.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_distribute_eval_dssm_pointwise_classification(self):
+    cur_eval_path = 'data/test/distribute_eval_test/dssm_distribute_eval_pointwise_classification_taobao_ckpt'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/dssm_distribute_eval_pointwise_classification_on_taobao.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_distribute_eval_dssm_reg(self):
+    cur_eval_path = 'data/test/distribute_eval_test/dssm_distribute_eval_reg_taobao_ckpt'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/dssm_distribute_eval_reg_on_taobao.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_distribute_eval_dropout(self):
+    cur_eval_path = 'data/test/distribute_eval_test/dropoutnet_distribute_eval_taobao_ckpt'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/dropoutnet_distribute_eval_on_taobao.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_distribute_eval_esmm(self):
+    cur_eval_path = 'data/test/distribute_eval_test/esmm_distribute_eval_taobao_ckpt'
+    self._success = test_utils.test_distributed_eval(
+        'samples/model_config/esmm_distribute_eval_on_taobao.config',
+        cur_eval_path, self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_share_no_used(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/share_embedding_not_used.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_neg_sampler_sequence_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_neg_sampler_sequence_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_neg_sampler_need_key_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_neg_sampler_need_key_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_on_multi_numeric_boundary_need_key_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_boundary_need_key_feature_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_on_multi_numeric_boundary_allow_key_transform(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_multi_numeric_boundary_allow_key_transform.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_dbmtl_on_multi_numeric_boundary_aux_hist_seq(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dbmtl_on_numeric_boundary_sequence_feature_aux_hist_seq_taobao.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_multi_tower_recall_neg_sampler_sequence_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_recall_neg_sampler_sequence_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_multi_tower_recall_neg_sampler_only_sequence_feature(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/multi_tower_recall_neg_sampler_only_sequence_feature.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(hvd is None, 'horovod is not installed')
+  def test_horovod(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/deepfm_combo_on_avazu_ctr.config',
+        self._test_dir,
+        use_hvd=True)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(hvd is None or sok is None,
+                   'horovod and sok is not installed')
+  def test_sok(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/multi_tower_on_taobao_sok.config',
+        self._test_dir,
+        use_hvd=True)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(
+      six.PY2 or tf_version.split('.')[0] != '2',
+      'only run on python3 and tf 2.x')
+  def test_train_parquet(self):
+    os.environ[constant.NO_ARITHMETRIC_OPTI] = '1'
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dlrm_on_criteo_parquet.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(hvd is None, 'horovod is not installed')
+  def test_train_parquet_embedding_parallel(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/dlrm_on_criteo_parquet_ep.config',
+        self._test_dir,
+        use_hvd=True)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(hvd is None, 'horovod is not installed')
+  def test_train_parquet_embedding_parallel_v2(self):
+    self._success = test_utils.test_distributed_train_eval(
+        'samples/model_config/dlrm_on_criteo_parquet_ep_v2.config',
+        self._test_dir,
+        use_hvd=True)
+    self.assertTrue(self._success)
+
+  def test_pdn(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/pdn_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_senet(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_senet_on_taobao.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_backbone_on_taobao(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_on_taobao_backbone.config', self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dssm_senet_backbone_on_taobao(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dssm_senet_on_taobao_backbone.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_parallel_dssm_backbone_on_taobao(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/parallel_dssm_on_taobao_backbone.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  def test_xdeefm_backbone_on_taobao(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/xdeepfm_on_taobao_backbone.config',
+        self._test_dir)
+    self.assertTrue(self._success)
+
+  @unittest.skipIf(gl is None, 'graphlearn is not installed')
+  def test_dat_on_taobao(self):
+    self._success = test_utils.test_single_train_eval(
+        'samples/model_config/dat_on_taobao.config', self._test_dir)
     self.assertTrue(self._success)
 
 

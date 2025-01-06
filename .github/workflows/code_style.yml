@@ -1,0 +1,49 @@
+name: CI Build Code Style
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  ci-test:
+    runs-on: EasyRec-py37-tf25
+    defaults:
+      run:
+        shell: bash {0}
+    steps:
+      - name: FetchCommit ${{ github.event.pull_request.head.sha }}
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: recursive
+      - name: RunCiTest
+        id: run_ci_test
+        env:
+          TEST_DEVICES: ""
+          PULL_REQUEST_NUM: ${{ github.event.pull_request.number }}
+        run: |
+           source ~/.bashrc
+           source activate tf25_py3
+           pre-commit run -a
+           if [ $? -eq 0 ]
+           then
+             echo "ci_test_passed=1" >> $GITHUB_OUTPUT
+           else
+             pre-commit run -a
+             if [ $? -eq 0 ]
+             then
+               echo "ci_test_passed=1" >> $GITHUB_OUTPUT
+             else
+               echo "ci_test_passed=0" >> $GITHUB_OUTPUT
+             fi
+           fi
+
+      - name: SignalFail
+        env:
+          CI_TEST_PASSED: ${{steps.run_ci_test.outputs.ci_test_passed}}
+        run: |
+          echo "CI_TEST_PASSED=${CI_TEST_PASSED}"
+          if [ $CI_TEST_PASSED -ne 1 ]
+          then
+            echo "code_style_test_failed, will exit"
+            exit 1
+          fi

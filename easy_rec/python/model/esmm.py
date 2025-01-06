@@ -12,7 +12,6 @@ from easy_rec.python.protos.loss_pb2 import LossType
 if tf.__version__ >= '2.0':
   tf = tf.compat.v1
 losses = tf.losses
-metrics = tf.metrics
 
 
 class ESMM(MultiTaskModel):
@@ -32,7 +31,9 @@ class ESMM(MultiTaskModel):
 
     self._group_num = len(self._model_config.groups)
     self._group_features = []
-    if self._group_num > 0:
+    if self.has_backbone:
+      logging.info('use bottom backbone network')
+    elif self._group_num > 0:
       logging.info('group_num: {0}'.format(self._group_num))
       for group_id in range(self._group_num):
         group = self._model_config.groups[group_id]
@@ -174,7 +175,9 @@ class ESMM(MultiTaskModel):
     Returns:
       self._prediction_dict: Prediction result of two tasks.
     """
-    if self._group_num > 0:
+    if self.has_backbone:
+      all_fea = self.backbone
+    elif self._group_num > 0:
       group_fea_arr = []
       # Both towers share the underlying network.
       for group_id in range(self._group_num):

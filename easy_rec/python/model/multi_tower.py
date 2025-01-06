@@ -22,8 +22,8 @@ class MultiTower(RankModel):
                is_training=False):
     super(MultiTower, self).__init__(model_config, feature_configs, features,
                                      labels, is_training)
-    assert self._model_config.WhichOneof('model') == 'multi_tower', \
-        'invalid model config: %s' % self._model_config.WhichOneof('model')
+    assert self._model_config.WhichOneof('model') == 'multi_tower', (
+        'invalid model config: %s' % self._model_config.WhichOneof('model'))
     self._model_config = self._model_config.multi_tower
     assert isinstance(self._model_config, MultiTowerConfig)
 

@@ -4,7 +4,7 @@ import logging
 
 import tensorflow as tf
 
-from easy_rec.python.utils.load_class import load_by_path
+from easy_rec.python.utils.activation import get_activation
 
 if tf.__version__ >= '2.0':
   tf = tf.compat.v1
@@ -12,21 +12,32 @@ if tf.__version__ >= '2.0':
 
 class DNN:
 
-  def __init__(self, dnn_config, l2_reg, name='dnn', is_training=False):
+  def __init__(self,
+               dnn_config,
+               l2_reg,
+               name='dnn',
+               is_training=False,
+               last_layer_no_activation=False,
+               last_layer_no_batch_norm=False):
     """Initializes a `DNN` Layer.
 
     Args:
       dnn_config: instance of easy_rec.python.protos.dnn_pb2.DNN
       l2_reg: l2 regularizer
       name: scope of the DNN, so that the parameters could be separated from other dnns
-      is_training: train phase or not, impact batchnorm and dropout
+      is_training: train phase or not, impact batch_norm and dropout
+      last_layer_no_activation: in last layer, use or not use activation
+      last_layer_no_batch_norm: in last layer, use or not use batch norm
     """
     self._config = dnn_config
     self._l2_reg = l2_reg
     self._name = name
     self._is_training = is_training
     logging.info('dnn activation function = %s' % self._config.activation)
-    self.activation = load_by_path(self._config.activation)
+    self.activation = get_activation(
+        self._config.activation, training=is_training)
+    self._last_layer_no_activation = last_layer_no_activation
+    self._last_layer_no_batch_norm = last_layer_no_batch_norm
 
   @property
   def hidden_units(self):
@@ -49,14 +60,16 @@ class DNN:
           kernel_regularizer=self._l2_reg,
           activation=None,
           name='%s/dnn_%d' % (self._name, i))
-      if self._config.use_bn:
+      if self._config.use_bn and ((i + 1 < hidden_units_len) or
+                                  not self._last_layer_no_batch_norm):
         deep_fea = tf.layers.batch_normalization(
             deep_fea,
             training=self._is_training,
             trainable=True,
             name='%s/dnn_%d/bn' % (self._name, i))
-      deep_fea = self.activation(
-          deep_fea, name='%s/dnn_%d/act' % (self._name, i))
+      if (i + 1 < hidden_units_len) or not self._last_layer_no_activation:
+        deep_fea = self.activation(
+            deep_fea, name='%s/dnn_%d/act' % (self._name, i))
       if len(self.dropout_ratio) > 0 and self._is_training:
         assert self.dropout_ratio[
             i] < 1, 'invalid dropout_ratio: %.3f' % self.dropout_ratio[i]

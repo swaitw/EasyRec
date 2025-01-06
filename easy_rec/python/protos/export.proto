@@ -15,7 +15,7 @@ message ExportConfig {
     // type of exporter [final | latest | best | none] when train_and_evaluation
     // final: performs a single export in the end of training
     // latest: regularly exports the serving graph and checkpoints
-    // latest: export the best model according to best_exporter_metric
+    // best: export the best model according to best_exporter_metric
     // none: do not perform export
     optional string exporter_type = 2 [default = 'final'];
 
@@ -42,9 +42,22 @@ message ExportConfig {
 
     // multi value field list
     optional MultiValueFields multi_value_fields = 10;
+
+    // auto analyze multi value fields
+    optional bool auto_multi_value = 16 [default = false];
+
     // is placeholder named by input
     optional bool placeholder_named_by_input = 11 [default = false];
 
     // filter out inputs, only keep effective ones
     optional bool filter_inputs = 12 [default = true];
+
+    // export the original feature values as string
+    optional bool export_features = 13 [default = false];
+
+    // export the outputs required by RTP
+    optional bool export_rtp_outputs = 14 [default = false];
+
+    // export asset files
+    repeated string asset_files = 15;
 }

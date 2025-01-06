@@ -15,6 +15,7 @@ message Optimizer {
     AdagradOptimizer adagrad_optimizer = 107;
     FtrlOptimizer ftrl_optimizer = 108;
     AdamAsyncWOptimizer adam_asyncw_optimizer = 109;
+    LazyAdamOptimizer lazy_adam_optimizer = 110;
   }
   optional bool use_moving_average = 5 [default = false];
   optional float moving_average_decay = 6 [default = 0.9999];
@@ -65,10 +66,17 @@ message AdamAsyncWOptimizer {
   optional float beta2 = 4 [default = 0.999];
 }
 
+message LazyAdamOptimizer {
+  optional LearningRate learning_rate = 1;
+  optional float beta1 = 3 [default = 0.9];
+  optional float beta2 = 4 [default = 0.999];
+}
+
 // Configuration message for the AdagradOptimizer
 // See: https://www.tensorflow.org/api_docs/python/tf/train/AdagradOptimizer
 message AdagradOptimizer {
-    optional LearningRate learning_rate = 1;
+  optional LearningRate learning_rate = 1;
+  optional float initial_accumulator_value = 2 [default = 0.1];
 }
 
 // Only available on pai-tf, which has better performance than AdamOptimizer

@@ -1,8 +1,8 @@
 # 训练
 
-### train_config
+## train_config
 
-- log_step_count_steps: 200    # 每200轮打印一行log
+- log_step_count_steps: 200    # 每200步打印一行log
 
 - optimizer_config     # 优化器相关的参数
 
@@ -20,18 +20,63 @@
   }
   ```
 
+  - 多优化器支持:
+    - 可以配置两个optimizer, 分别对应embedding权重和dense权重;
+    - 实现参考EasyRecModel.get_grouped_vars和multi_optimizer.MultiOptimizer;
+    - 示例(samples/model_config/deepfm_combo_on_avazu_embed_adagrad.config):
+      ```protobuf
+      train_config {
+        ...
+         optimizer_config {  # for embedding_weights
+           adagrad_optimizer {
+             learning_rate {
+               constant_learning_rate {
+                 learning_rate: 0.05
+               }
+             }
+             initial_accumulator_value: 1.0
+           }
+         }
+
+         optimizer_config: {  # for dense weights
+           adam_optimizer: {
+             learning_rate: {
+               exponential_decay_learning_rate {
+                 initial_learning_rate: 0.0001
+                 decay_steps: 10000
+                 decay_factor: 0.5
+                 min_learning_rate: 0.0000001
+               }
+             }
+           }
+         }
+      ```
+    - Note: [WideAndDeep](./models/wide_and_deep.md)模型的optimizer设置:
+      - 设置两个optimizer时, 第一个optimizer仅用于wide参数;
+      - 如果要给deep embedding单独设置optimizer, 需要设置3个optimizer.
+
 - sync_replicas: true  # 是否同步训练，默认是false
 
   - 使用SyncReplicasOptimizer进行分布式训练(同步模式)
   - 仅在train_distribute为NoStrategy时可以设置成true，其它情况应该设置为false
   - PS异步训练也设置为false
 
-- train_distribute: 默认不开启Strategy(NoStrategy), strategy确定分布式执行的方式
+- train_distribute: 默认不开启Strategy(NoStrategy), strategy确定分布式执行的方式, 可以分成两种模式: PS-Worker模式 和 All-Reduce模式
 
-  - NoStrategy 不使用Strategy
-  - PSStrategy 异步ParameterServer模式
-  - MirroredStrategy 单机多卡模式，仅在PAI上可以使用，本地和EMR上不能使用
-  - MultiWorkerMirroredStrategy 多机多卡模式，在TF版本>=1.15时可以使用
+  - PS-Worker模式:
+    - NoStrategy: 根据sync_replicas的取值决定采用同步或者异步训练
+      - sync_replicas=true，采用ps worker同步训练
+        - 注意: 该模式容易导致ps存在通信瓶颈, 建议用混合并行的模式进行同步训练
+      - sync_replicas=false, 采用ps worker异步训练
+  - All-Reduce模式:
+    - 数据并行:
+      - MirroredStrategy: 单机多卡模式，仅在PAI上可以使用，本地和EMR上不能使用
+      - MultiWorkerMirroredStrategy: 多机多卡模式，在TF版本>=1.15时可以使用
+      - HorovodStragtegy: horovod多机多卡并行, 需要安装horovod
+    - 混合并行: 数据并行 + Embedding分片, 需要安装horovod
+      - EmbeddingParallelStrategy: 在horovod多机多卡并行的基础上, 增加了Embedding分片的功能
+      - SokStrategy: 在horovod多机多卡并行的基础上, 增加了[SOK](https://github.com/NVIDIA-Merlin/HugeCTR/tree/main/sparse_operation_kit) Key-Value Embedding和Embedding分片的功能
+        - 注意: 该模式仅支持GPU模式, 需要安装SOK.
 
 - num_gpus_per_worker: 仅在MirrorredStrategy, MultiWorkerMirroredStrategy, PSStrategy的时候有用
 
@@ -39,11 +84,10 @@
 
   - 总共训练多少轮
   - num_steps = total_sample_num * num_epochs / batch_size / num_workers
-  - **分布式训练时一定要设置num_steps，否则评估任务会结束不了**
 
 - fine_tune_checkpoint: 需要restore的checkpoint路径，也可以是包含checkpoint的目录，如果目录里面有多个checkpoint，将使用最新的checkpoint
 
-- fine_tune_ckpt_var_map: 需要restore的参数列表文件路径，文件的每一行是{variable_name in current model ckpt}\\t{variable name in old model ckpt}
+- fine_tune_ckpt_var_map: 需要restore的参数列表文件路径，文件的每一行是{variable_name in current model}\\t{variable name in old model ckpt}
 
   - 需要设置fine_tune_ckpt_var_map的情形:
     - current ckpt和old ckpt不完全匹配, 如embedding的名字不一样:
@@ -62,11 +106,11 @@
     print(key)
   ```
 
-- save_checkpoints_steps: 每隔多少轮保存一次checkpoint, 默认是1000
+- save_checkpoints_steps: 每隔多少步保存一次checkpoint, 默认是1000。当训练数据量很大的时候，这个值要设置大一些
 
 - save_checkpoints_secs: 每隔多少s保存一次checkpoint, 不可以和save_checkpoints_steps同时指定
 
-- keep_checkpoint_max: 最多保存多少个checkpoint, 默认是10
+- keep_checkpoint_max: 最多保存多少个checkpoint, 默认是10。当模型较大的时候可以设置为5，可节约存储
 
 - log_step_count_steps: 每隔多少轮，打印一次训练信息，默认是10
 
@@ -74,9 +118,9 @@
 
 - 更多参数请参考[easy_rec/python/protos/train.proto](./reference.md)
 
-### 训练命令
+## 训练命令
 
-#### Local
+### Local
 
 ```bash
 python -m easy_rec.python.train_eval --pipeline_config_path dwd_avazu_ctr_deepmodel.config
@@ -86,11 +130,18 @@ python -m easy_rec.python.train_eval --pipeline_config_path dwd_avazu_ctr_deepmo
 - --continue_train: restore之前的checkpoint，继续训练
 - --model_dir: 如果指定了model_dir将会覆盖config里面的model_dir，一般在周期性调度的时候使用
 - --edit_config_json: 使用json的方式对config的一些字段进行修改，如:
-  ```sql
-  --edit_config_json='{"train_config.fine_tune_checkpoint": "oss://easyrec/model.ckpt-50"}'
+  ```bash
+  --edit_config_json='{"train_config.fine_tune_checkpoint": "experiments/ctr/model.ckpt-50"}'
+  ```
+- Extend Args: 命令行参数修改config, 类似edit_config_json
+  - 支持train_config.*, eval_config.*, data_config.*, feature_config.*
+  - 示例:
+  ```bash
+  --train_config.fine_tune_checkpoint=experiments/ctr/model.ckpt-50
+  --data_config.negative_sampler.input_path=data/test/tb_data/taobao_ad_feature_gl
   ```
 
-#### On PAI
+### On PAI
 
 ```sql
 pai -name easy_rec_ext -project algo_public
@@ -126,32 +177,60 @@ pai -name easy_rec_ext -project algo_public
 - 如果是pai内部版,则不需要指定arn和ossHost, arn和ossHost放在-Dbuckets里面
   - -Dbuckets=oss://easyrec/?role_arn=acs:ram::xxx:role/ev-ext-test-oss&host=oss-cn-beijing-internal.aliyuncs.com
 
-#### On EMR
+### On DLC
 
-单机单卡模式:
+- 基于Kubeflow的云原生的训练方式
+- [参考文档](./quick_start/dlc_tutorial.md)
 
-```bash
-el_submit -t standalone -a easy_rec_train -f dwd_avazu_ctr_deepmodel.config -m local  -wn 1 -wc 6 -wm 20000  -wg 1 -c "python -m easy_rec.python.train_eval --pipeline_config_path dwd_avazu_ctr_deepmodel.config --continue_train"
-```
+### On EMR
 
-- 参数同Local模式
+- 基于开源大数据平台的训练方式
+- [参考文档](https://help.aliyun.com/zh/emr/emr-on-ecs/user-guide/use-easyrec-to-perform-model-training-evaluation-and-prediction-on-data-from-hive-tables)
 
-多worker模式:
+## 混合并行(EmbeddingParallel)
 
-- 需要在配置文件中设置train_config.train_distribute为MultiWorkerMirroredStrategy
+混合并行模式下Embedding参数会分片, 均匀分布到各个worker上, 通过all2all的通信方式来聚合不同worker上的Embedding。MLP参数在每个worker上都有完整的一份复制, 在参数更新时，会通过allreduce的方式同步不同worker的更新。
 
-```bash
-el_submit -t standalone -a easy_rec_train -f dwd_avazu_ctr_deepmodel.config -m local  -wn 1 -wc 6 -wm 20000  -wg 2 -c "python -m easy_rec.python.train_eval --pipeline_config_path dwd_avazu_ctr_deepmodel.config --continue_train"
-```
+### 依赖
 
-- 参数同Local模式
+- 混合并行使用Horovod做底层的通信, 因此需要安装Horovod, 可以直接使用下面的镜像
+- mybigpai-public-registry.cn-beijing.cr.aliyuncs.com/easyrec/easyrec:sok-tf212-gpus-v5
+  ```
+    sudo docker run --gpus=all --privileged -v /home/easyrec/:/home/easyrec/ -ti mybigpai-public-registry.cn-beijing.cr.aliyuncs.com/easyrec/easyrec:sok-tf212-gpus-v5 bash
+  ```
 
-PS模式:
+### 配置
 
-- 需要在配置文件中设置train_config.sync_replicas为true
+- 修改train_config.train_distribute为EmbeddingParallelStrategy
+  ```
+   train_config {
+      ...
+      train_distribute: EmbeddingParallelStrategy
+      ...
+   }
+  ```
+- 如使用key-Value Embedding, 需要设置model_config.ev_params
+  ```
+  model_config {
+    ...
+    ev_params {
+    }
+    ...
+  }
+  ```
 
-```bash
-el_submit -t tensorflow-ps -a easy_rec_train -f dwd_avazu_ctr_deepmodel.config -m local -pn 1 -pc 4 -pm 20000 -wn 3 -wc 6 -wm 20000 -c "python -m easy_rec.python.train_eval --pipeline_config_path dwd_avazu_ctr_deepmodel.config --continue_train"
-```
+### 命令
 
-- 参数同Local模式
+- 训练
+  ```
+     CUDA_VISIBLE_DEVICES=0,1,2,4 horovodrun -np 4  python -m easy_rec.python.train_eval --pipeline_config_path samples/model_config/dlrm_on_criteo_parquet_ep_v2.config
+  ```
+- 评估
+  ```
+     CUDA_VISIBLE_DEVICES=0 horovodrun -np 1 python -m easy_rec.python.eval --pipeline_config_path samples/model_config/dlrm_on_criteo_parquet_ep_v2.config
+  ```
+  - 注意: 评估目前仅支持单个worker评估
+- 导出
+  ```
+    CUDA_VISIBLE_DEVICES=0 horovodrun -np 1 python -m easy_rec.python.export --pipeline_config_path samples/model_config/dlrm_on_criteo_parquet_ep_v2.config --export_dir dlrm_criteo_export/
+  ```

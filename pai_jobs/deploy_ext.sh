@@ -22,7 +22,9 @@ ODPSCMD=odpscmd
 mode=0
 odps_config=""
 
-while getopts 'V:C:OGc:' OPT; do
+is_tf15=0
+is_py3=0
+while getopts 'V:C:OGc:D:P' OPT; do
     case $OPT in
         V)
             VERSION="$OPTARG";;
@@ -34,12 +36,18 @@ while getopts 'V:C:OGc:' OPT; do
             mode=1;;
         G)
             mode=2;;
+        D)
+            is_tf15=1;;
+        P)
+            is_py3=1;;
         ?)
             echo "Usage: `basename $0` -V VERSION [-C odpscmd_path] [-c odps_config_path] [-O]"
             echo " -O: only update easy_rec resource file"
             echo " -G: generate resource file and xflow, but not deploy"
             echo " -c: odps_config file path"
             echo " -C: odpscmd file path, default to: odpscmd, so in default odpscmd must be in PATH"
+            echo " -D: use tf1.15 or deeprec"
+            echo " -P: use tf1.12_py3"
             echo " -V: algorithm version, chars must be in [0-9A-Za-z_-], default: version info in easy_rec/version.py"
             exit 1
     esac
@@ -85,20 +93,83 @@ cd $curr_dir
 
 RES_PATH=easy_rec_ext_${VERSION}_res.tar.gz
 
-if [ ! -e easy_rec ]
+if [ -e easy_rec ]
 then
-  ln -s $root_dir/easy_rec ./
+  rm -rf easy_rec
 fi
-cp easy_rec/__init__.py easy_rec/__init__.py.bak
+cp -R $root_dir/easy_rec ./easy_rec
 sed -i -e "s/\[VERSION\]/$VERSION/g" easy_rec/__init__.py
 find -L easy_rec -name "*.pyc" | xargs rm -rf
-tar -cvzhf $RES_PATH easy_rec run.py
-mv easy_rec/__init__.py.bak easy_rec/__init__.py
+
+if [ ! -d "datahub" ]
+then
+  if [ ! -e "pydatahub.tar.gz" ]
+  then
+    wget http://easyrec.oss-cn-beijing.aliyuncs.com/third_party/pydatahub.tar.gz
+    if [ $? -ne 0 ]
+    then
+      echo "datahub download failed."
+    fi
+  fi
+  tar -zvxf pydatahub.tar.gz
+  rm -rf pydatahub.tar.gz
+fi
+
+if [ ! -d "kafka" ]
+then
+  if [ ! -e "kafka.tar.gz" ]
+  then
+    wget http://easyrec.oss-cn-beijing.aliyuncs.com/third_party/kafka.tar.gz
+    if [ $? -ne 0 ]
+    then
+      echo "kafka download failed."
+    fi
+  fi
+  tar -zvxf kafka.tar.gz
+  rm -rf kafka.tar.gz
+fi
+
+if [ ! -d "faiss" ]
+then
+  if [ ! -e "faiss.tar.gz" ]
+  then
+    wget http://easyrec.oss-cn-beijing.aliyuncs.com/third_party/faiss.tar.gz
+    if [ $? -ne 0 ]
+    then
+      echo "faiss download failed."
+    fi
+  fi
+  tar -zvxf faiss.tar.gz
+  rm -rf faiss.tar.gz
+fi
+
+if [ ! -d "tensorflow_probability" ]
+then
+  if [ $is_tf15 -gt 0 ]; then
+    tfp_version='0.8.0'
+  else
+    tfp_version='0.5.0'
+  fi
+  if [ ! -e "tensorflow_probability" ]
+  then
+    wget http://easyrec.oss-cn-beijing.aliyuncs.com/3rdparty/probability-${tfp_version}.tar.gz
+    if [ $? -ne 0 ]
+    then
+      echo "tensorflow_probability download failed."
+    fi
+  fi
+  tar -xzvf probability-${tfp_version}.tar.gz --strip-components=1 probability-${tfp_version}/tensorflow_probability
+  rm -rf tensorflow_probability/examples
+  rm -rf tensorflow_probability/g3doc
+  rm -rf probability-${tfp_version}.tar.gz
+fi
+
+tar -cvzhf $RES_PATH easy_rec datahub lz4 cprotobuf kafka faiss tensorflow_probability run.py
 
 # 2 means generate only
 if [ $mode -ne 2 ]
 then
-  ${ODPSCMD} --config=$odps_config -e "add file $RES_PATH -f;"
+  ${ODPSCMD} --config=$odps_config -e "add archive $RES_PATH -f;"
   if [ $? -ne 0 ]
   then
     echo "add $RES_PATH failed"
@@ -117,7 +188,24 @@ fi
 
 cd easy_rec_flow_ex
 sed -i -e "s/parameter name=\"version\" use=\"optional\" default=\"[0-9A-Za-z_-]\+\"/parameter name=\"version\" use=\"optional\" default=\"$VERSION\"/g" easy_rec_ext.xml
+
+if [ $is_tf15 -gt 0 ]
+then
+  echo "will deploy DeepRec(TF1.15) version"
+  sed -i -e "s/name=\"easy_rec_ext\"/name=\"easy_rec_ext15\"/g" easy_rec_ext.xml
+  sed -i -e "s/tensorflow1120_ext/tensorflow1150_ext/g" easy_rec_ext.xml
+fi
+
+if [ $is_py3 -gt 0 ]
+then
+  echo "will deploy TF1.12_py3 version"
+  sed -i -e "s/name=\"easy_rec_ext\"/name=\"easy_rec_py3_ext\"/g" easy_rec_ext.xml
+  sed -i -e "s/tensorflow1120_ext/tensorflow1120_py3_ext/g" easy_rec_ext.xml
+fi
+
 tar -cvzf easy_rec_flow_ex.tar.gz easy_rec_ext.lua  easy_rec_ext.xml
+
+git checkout ./easy_rec_ext.xml
 
 if [ $mode -ne 2 ]
 then
